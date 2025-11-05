@@ -20,7 +20,6 @@ import (
 )
 
 type DebridLink struct {
-	name             string
 	Host             string `json:"host"`
 	APIKey           string
 	accountsManager  *account.Manager
@@ -28,11 +27,8 @@ type DebridLink struct {
 	client           *request.Client
 
 	autoExpiresLinksAfter time.Duration
-
-	MountPath   string
-	logger      zerolog.Logger
-	checkCached bool
-	addSamples  bool
+	logger                zerolog.Logger
+	config                config.Debrid
 
 	Profile *types.Profile `json:"profile,omitempty"`
 }
@@ -55,22 +51,19 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*DebridLink
 		autoExpiresLinksAfter = 48 * time.Hour
 	}
 	return &DebridLink{
-		name:                  "debridlink",
 		Host:                  "https://debrid-link.com/api/v2",
 		APIKey:                dc.APIKey,
 		accountsManager:       account.NewManager(dc, ratelimits["download"], _log),
 		DownloadUncached:      dc.DownloadUncached,
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
 		client:                client,
-		MountPath:             dc.Folder,
 		logger:                logger.New(dc.Name),
-		checkCached:           dc.CheckCached,
-		addSamples:            dc.AddSamples,
+		config:                dc,
 	}, nil
 }
 
-func (dl *DebridLink) Name() string {
-	return dl.name
+func (dl *DebridLink) Config() config.Debrid {
+	return dl.config
 }
 
 func (dl *DebridLink) Logger() zerolog.Logger {
@@ -156,8 +149,7 @@ func (dl *DebridLink) GetTorrent(torrentId string) (*types.Torrent, error) {
 		Status:           "downloaded",
 		Filename:         name,
 		OriginalFilename: name,
-		MountPath:        dl.MountPath,
-		Debrid:           dl.name,
+		Debrid:           dl.config.Name,
 		Added:            time.Unix(t.Created, 0).Format(time.RFC3339),
 	}
 	cfg := config.Get()
@@ -203,9 +195,9 @@ func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
 		return fmt.Errorf("torrent not found")
 	}
 	data := dt[0]
-	status := "downloading"
+	status := types.TorrentStatusDownloading
 	if data.Status == 100 {
-		status = "downloaded"
+		status = types.TorrentStatusCompleted
 	}
 	name := utils.RemoveInvalidChars(data.Name)
 	t.Id = data.ID
@@ -267,20 +259,18 @@ func (dl *DebridLink) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
 		return nil, fmt.Errorf("error adding torrent")
 	}
 	data := *res.Value
-	status := "downloading"
 	name := utils.RemoveInvalidChars(data.Name)
 	t.Id = data.ID
 	t.Name = name
 	t.Bytes = data.TotalSize
 	t.Folder = name
 	t.Progress = data.DownloadPercent
-	t.Status = status
+	t.Status = types.TorrentStatusDownloading
 	t.Speed = data.DownloadSpeed
 	t.Seeders = data.PeersConnected
 	t.Filename = name
 	t.OriginalFilename = name
-	t.MountPath = dl.MountPath
-	t.Debrid = dl.name
+	t.Debrid = dl.config.Name
 	t.Added = time.Unix(data.Created, 0).Format(time.RFC3339)
 	now := time.Now()
 	for _, f := range data.Files {
@@ -315,11 +305,10 @@ func (dl *DebridLink) CheckStatus(torrent *types.Torrent) (*types.Torrent, error
 		if err != nil || torrent == nil {
 			return torrent, err
 		}
-		status := torrent.Status
-		if status == "downloaded" {
+		if torrent.Status == types.TorrentStatusCompleted {
 			dl.logger.Info().Msgf("Torrent: %s downloaded", torrent.Name)
 			return torrent, nil
-		} else if utils.Contains(dl.GetDownloadingStatus(), status) {
+		} else if utils.Contains(dl.GetDownloadingStatus(), string(torrent.Status)) {
 			if !torrent.DownloadUncached {
 				return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
 			}
@@ -414,8 +403,7 @@ func (dl *DebridLink) getTorrents(page, perPage int) ([]*types.Torrent, error) {
 			OriginalFilename: t.Name,
 			InfoHash:         t.HashString,
 			Files:            make(map[string]types.File),
-			Debrid:           dl.name,
-			MountPath:        dl.MountPath,
+			Debrid:           dl.config.Name,
 			Added:            time.Unix(t.Created, 0).Format(time.RFC3339),
 		}
 		cfg := config.Get()
@@ -454,10 +442,6 @@ func (dl *DebridLink) CheckLink(link string) error {
 	return nil
 }
 
-func (dl *DebridLink) GetMountPath() string {
-	return dl.MountPath
-}
-
 func (dl *DebridLink) GetAvailableSlots() (int, error) {
 	//TODO: Implement the logic to check available slots for DebridLink
 	return 0, fmt.Errorf("GetAvailableSlots not implemented for DebridLink")
@@ -489,7 +473,7 @@ func (dl *DebridLink) GetProfile() (*types.Profile, error) {
 	profile := &types.Profile{
 		Id:         1,
 		Username:   data.Username,
-		Name:       dl.name,
+		Name:       dl.config.Name,
 		Email:      data.Email,
 		Points:     data.Points,
 		Premium:    data.PremiumLeft,

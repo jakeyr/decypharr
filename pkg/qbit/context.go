@@ -11,7 +11,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/pkg/arr"
-	"github.com/sirrobot01/decypharr/pkg/wire"
 )
 
 type contextKey string
@@ -136,9 +135,7 @@ func getUsernameAndPassword(r *http.Request) (string, string, error) {
 
 func (q *QBit) authenticate(category, username, password string) (*arr.Arr, error) {
 	cfg := config.Get()
-	arrs := wire.Get().Arr()
-	// Check if arr exists
-	a := arrs.Get(category)
+	a := q.manager.Arr().Get(category)
 	if a == nil {
 		// Arr is not configured, create a new one
 		downloadUncached := false
@@ -161,8 +158,7 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 		}
 	}
 	a.Source = "auto"
-	arrs.AddOrUpdate(a)
-
+	q.manager.Arr().AddOrUpdate(a)
 	return a, nil
 }
 

@@ -8,30 +8,16 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/request"
+	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	"github.com/sirrobot01/decypharr/pkg/wire"
 )
 
 func (s *Server) handleIngests(w http.ResponseWriter, r *http.Request) {
-	ingests := make([]debridTypes.IngestData, 0)
-	_store := wire.Get()
-	debrids := _store.Debrid()
-	if debrids == nil {
-		http.Error(w, "Debrid service is not enabled", http.StatusInternalServerError)
+	ingests, err := s.manager.GetIngests()
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Failed to get ingests")
+		http.Error(w, "Failed to get ingests: "+err.Error(), http.StatusInternalServerError)
 		return
-	}
-	for _, cache := range debrids.Caches() {
-		if cache == nil {
-			s.logger.Error().Msg("Debrid cache is nil, skipping")
-			continue
-		}
-		data, err := cache.GetIngests()
-		if err != nil {
-			s.logger.Error().Err(err).Msg("Failed to get ingests from debrid cache")
-			http.Error(w, "Failed to get ingests: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		ingests = append(ingests, data...)
 	}
 
 	request.JSONResponse(w, ingests, 200)
@@ -43,41 +29,23 @@ func (s *Server) handleIngestsByDebrid(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Debrid name is required", http.StatusBadRequest)
 		return
 	}
-
-	_store := wire.Get()
-	debrids := _store.Debrid()
-
-	if debrids == nil {
-		http.Error(w, "Debrid service is not enabled", http.StatusInternalServerError)
-		return
-	}
-
-	caches := debrids.Caches()
-
-	cache, exists := caches[debridName]
-	if !exists {
-		http.Error(w, "Debrid cache not found: "+debridName, http.StatusNotFound)
-		return
-	}
-
-	data, err := cache.GetIngests()
+	ingests, err := s.manager.GetIngestsByDebrid(debridName)
 	if err != nil {
-		s.logger.Error().Err(err).Msg("Failed to get ingests from debrid cache")
+		s.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to get ingests by debrid")
 		http.Error(w, "Failed to get ingests: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	request.JSONResponse(w, data, 200)
+	request.JSONResponse(w, ingests, 200)
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 
-	// Get uptime from the store
-	store := wire.Get()
-	uptime := store.Uptime()
-	startTime := store.StartTime()
+	// Get uptime from manager
+	uptime := s.manager.Uptime()
+	startTime := s.manager.StartTime()
 
 	stats := map[string]any{
 		// Memory stats
@@ -104,45 +72,52 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		"start_time":     startTime.Format("2006-01-02 15:04:05"),
 	}
 
-	debrids := wire.Get().Debrid()
-	if debrids != nil {
-		clients := debrids.Clients()
-		caches := debrids.Caches()
-		debridStats := make([]debridTypes.Stats, 0)
-		for debridName, client := range clients {
-			debridStat := debridTypes.Stats{}
-			libraryStat := debridTypes.LibraryStats{}
-			profile, err := client.GetProfile()
-			if err != nil {
-				s.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to get debrid profile")
-				profile = &debridTypes.Profile{
-					Name: debridName,
-				}
-			}
-			profile.Name = debridName
-			debridStat.Profile = profile
-			cache, ok := caches[debridName]
-			if ok {
-				// Get torrent data
-				libraryStat.Total = cache.TotalTorrents()
-				libraryStat.Bad = len(cache.GetListing("__bad__"))
-				libraryStat.ActiveLinks = cache.GetTotalActiveDownloadLinks()
-
-			}
-			debridStat.Library = libraryStat
-			debridStat.Accounts = client.AccountManager().Stats()
-			debridStats = append(debridStats, debridStat)
-		}
-		stats["debrids"] = debridStats
+	// Get debrid stats from manager
+	debridStats := make([]debridTypes.Stats, 0)
+	torrentsCounts, err := s.manager.GetTorrentsCount()
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Failed to get torrents count")
+		torrentsCounts = 0
 	}
+	s.manager.Clients().Range(func(debridName string, client debrid.Client) bool {
+		if client == nil {
+			return true
+		}
+
+		debridStat := debridTypes.Stats{}
+		libraryStat := debridTypes.LibraryStats{}
+
+		profile, err := client.GetProfile()
+		if err != nil {
+			s.logger.Error().Err(err).Str("debrid", debridName).Msg("Failed to get debrid profile")
+			profile = &debridTypes.Profile{
+				Name: debridName,
+			}
+		}
+		profile.Name = debridName
+		debridStat.Profile = profile
+
+		// Get torrent data from manager
+
+		if err == nil {
+			libraryStat.Total = torrentsCounts
+			libraryStat.ActiveLinks = s.manager.GetTotalActiveDownloadLinks()
+		}
+
+		debridStat.Library = libraryStat
+		debridStat.Accounts = client.AccountManager().Stats()
+		debridStats = append(debridStats, debridStat)
+		return true
+	})
+	stats["debrids"] = debridStats
 
 	// Add mount stats if available (supports rclone, dfs, or external)
 	cfg := config.Get()
-	mountManager := wire.Get().MountManager()
+	mountManager := s.manager.MountManager()
 
 	if mountManager != nil && mountManager.IsReady() {
-		mountStats, err := mountManager.GetStats()
-		if err != nil {
+		mountStats := mountManager.Stats()
+		if mountStats == nil {
 			stats["mount"] = map[string]interface{}{
 				"error":   fmt.Sprintf("failed to get mount stats: %v", err),
 				"type":    mountManager.Type(),

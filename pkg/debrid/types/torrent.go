@@ -23,13 +23,12 @@ type Torrent struct {
 	Bytes            int64           `json:"bytes"` // Size of only the files that are downloaded
 	Magnet           *utils.Magnet   `json:"magnet"`
 	Files            map[string]File `json:"files"`
-	Status           string          `json:"status"`
+	Status           TorrentStatus   `json:"status"`
 	Added            string          `json:"added"`
 	Progress         float64         `json:"progress"`
 	Speed            int64           `json:"speed"`
 	Seeders          int             `json:"seeders"`
 	Links            []string        `json:"links"`
-	MountPath        string          `json:"mount_path"`
 	DeletedFiles     []string        `json:"deleted_files"`
 
 	Debrid string `json:"debrid"`
@@ -68,7 +67,6 @@ func (t *Torrent) Copy() *Torrent {
 		Speed:            t.Speed,
 		Seeders:          t.Seeders,
 		Links:            append([]string{}, t.Links...),
-		MountPath:        t.MountPath,
 		Debrid:           t.Debrid,
 		Arr:              t.Arr,
 	}

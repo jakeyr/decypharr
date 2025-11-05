@@ -55,7 +55,7 @@ func New(name, host, token string, cleanup, skipRepair bool, downloadUncached *b
 		Name:             name,
 		Host:             host,
 		Token:            strings.TrimSpace(token),
-		Type:             InferType(host, name),
+		Type:             inferType(host, name),
 		Cleanup:          cleanup,
 		SkipRepair:       skipRepair,
 		DownloadUncached: downloadUncached,
@@ -143,21 +143,6 @@ func (s *Storage) Cleanup() {
 	s.Arrs = make(map[string]*Arr)
 }
 
-func InferType(host, name string) Type {
-	switch {
-	case strings.Contains(host, "sonarr") || strings.Contains(name, "sonarr"):
-		return Sonarr
-	case strings.Contains(host, "radarr") || strings.Contains(name, "radarr"):
-		return Radarr
-	case strings.Contains(host, "lidarr") || strings.Contains(name, "lidarr"):
-		return Lidarr
-	case strings.Contains(host, "readarr") || strings.Contains(name, "readarr"):
-		return Readarr
-	default:
-		return Others
-	}
-}
-
 func NewStorage() *Storage {
 	arrs := make(map[string]*Arr)
 	for _, a := range config.Get().Arrs {
@@ -189,6 +174,16 @@ func (s *Storage) AddOrUpdate(arr *Arr) {
 		return
 	}
 	s.Arrs[arr.Name] = arr
+}
+
+func (s *Storage) GetOrCreate(name string) *Arr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	arr, exists := s.Arrs[name]
+	if !exists {
+		return New(name, "", "", false, false, nil, "", "manual")
+	}
+	return arr
 }
 
 func (s *Storage) Get(name string) *Arr {
@@ -327,4 +322,19 @@ func (a *Arr) Refresh() {
 	}
 
 	_, _ = a.Request(http.MethodPost, "api/v3/command", payload)
+}
+
+func inferType(host, name string) Type {
+	switch {
+	case strings.Contains(host, "sonarr") || strings.Contains(name, "sonarr"):
+		return Sonarr
+	case strings.Contains(host, "radarr") || strings.Contains(name, "radarr"):
+		return Radarr
+	case strings.Contains(host, "lidarr") || strings.Contains(name, "lidarr"):
+		return Lidarr
+	case strings.Contains(host, "readarr") || strings.Contains(name, "readarr"):
+		return Readarr
+	default:
+		return Others
+	}
 }

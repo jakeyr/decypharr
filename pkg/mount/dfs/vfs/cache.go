@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
-	"github.com/sirrobot01/decypharr/pkg/debrid/store"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
 )
 
@@ -76,14 +76,14 @@ type FileAccessInfo struct {
 
 // Manager manages sparse files for all remote files
 type Manager struct {
-	debrid      *store.Cache
 	config      *config.FuseConfig
 	files       *xsync.Map[string, *SparseFile]
 	closeCtx    context.Context
 	closeCancel context.CancelFunc
 
 	// Stats tracker for passing to readers/files
-	stats *StatsTracker
+	stats   *StatsTracker
+	manager *manager.Manager
 
 	// Smart caching: track file access for episode detection
 	fileAccessTracker *xsync.Map[string, *FileAccessInfo]
@@ -94,14 +94,14 @@ type Manager struct {
 }
 
 // NewManager creates a sparseFile manager
-func NewManager(debridCache *store.Cache, fuseConfig *config.FuseConfig) *Manager {
+func NewManager(manager *manager.Manager, fuseConfig *config.FuseConfig) *Manager {
 	// Create stats tracker
 	statsTracker := &StatsTracker{}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
 		config:            fuseConfig,
-		debrid:            debridCache,
+		manager:           manager,
 		files:             xsync.NewMap[string, *SparseFile](),
 		closeCtx:          ctx,
 		closeCancel:       cancel,
@@ -160,7 +160,7 @@ func (m *Manager) GetOrCreateFile(torrentName, filename string, size int64) (*Sp
 	}
 
 	// Create new sparse file
-	sf, err := newSparseFile(m.config.CacheDir, torrentName, filename, size, m.config.ChunkSize, m.stats, m)
+	sf, err := newSparseFile(m.config.CacheDir, torrentName, filename, size, m.config.ChunkSize, m.stats, m.manager)
 	if err != nil {
 		return nil, err
 	}
@@ -190,13 +190,7 @@ func (m *Manager) CreateReader(torrentName string, torrentFile types.File) (*Fil
 
 	// Check if already exists
 	if f, ok := m.files.Load(key); ok {
-		// Make sure it has download capabilities
-		if f.debrid != nil {
-			return f, nil
-		}
-		// Old file without download support, remove it
-		m.files.Delete(key)
-		_ = f.Close()
+		return f, nil
 	}
 
 	// Create new file with download capabilities
@@ -207,7 +201,7 @@ func (m *Manager) CreateReader(torrentName string, torrentFile types.File) (*Fil
 		readAhead = chunkSize * 2 // Minimum 2 chunks ahead for smooth playback
 	}
 
-	f, err := newFile(m.config.CacheDir, m.debrid, torrentName, torrentFile, chunkSize, readAhead, m.stats, m)
+	f, err := newFile(m.config.CacheDir, torrentName, torrentFile, chunkSize, readAhead, m.stats, m.manager)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +289,10 @@ func (m *Manager) syncAllMetadata() {
 			sparseFile.mu.Lock()
 			defer sparseFile.mu.Unlock()
 			if sparseFile.dirty && sparseFile.ranges != nil {
-				_ = sparseFile.saveMetadata()
+				metadata, err := sparseFile.getMetadata()
+				if err == nil {
+					_ = m.saveMetadata(sparseFile.torrentName, sparseFile.fileName, metadata)
+				}
 				sparseFile.dirty = false
 			}
 		}(sf)

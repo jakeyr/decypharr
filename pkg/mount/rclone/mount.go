@@ -4,57 +4,48 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/pkg/debrid/store"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
 // Mount represents a mount using the rclone RC client
 type Mount struct {
-	Provider     string
-	MountPath    string
-	WebDAVURL    string
-	debridConfig config.Debrid
-	logger       zerolog.Logger
-	info         atomic.Value
+	Provider  string
+	MountPath string
+	WebDAVURL string
+	logger    zerolog.Logger
+	info      atomic.Value
 }
 
 // NewMount creates a new RC-based mount
-func NewMount(debridCache *store.Cache) (*Mount, error) {
+func NewMount(mountInfo manager.FileInfo, manager *manager.Manager, logger zerolog.Logger) (*Mount, error) {
 	cfg := config.Get()
-	debridConfig := debridCache.GetConfig()
 	bindAddress := cfg.BindAddress
 	if bindAddress == "" {
 		bindAddress = "localhost"
 	}
-	_logger := logger.New("rclone")
+	_logger := logger.With().Str("mount", mountInfo.Name()).Logger()
 
 	baseUrl := fmt.Sprintf("http://%s:%s", bindAddress, cfg.Port)
-	webdavUrl, err := url.JoinPath(baseUrl, cfg.URLBase, "webdav", debridConfig.Name)
+	webdavUrl, err := url.JoinPath(baseUrl, cfg.URLBase, "webdav", mountInfo.Name())
 	if err != nil {
-		return nil, fmt.Errorf("failed to construct WebDAV URL for %s: %w", debridConfig.Name, err)
+		return nil, fmt.Errorf("failed to construct WebDAV URL for %s: %w", mountInfo.Name(), err)
 	}
 
-	mountPath := debridConfig.RcloneMountPath
-	if debridConfig.RcloneMountPath == "" {
-		mountPath = filepath.Join(cfg.Rclone.MountPath, debridConfig.Name)
-	}
+	mountPath := mountInfo.Path()
 	if !strings.HasSuffix(webdavUrl, "/") {
 		webdavUrl += "/"
 	}
 
 	return &Mount{
-		Provider:     debridConfig.Name,
-		MountPath:    mountPath,
-		WebDAVURL:    webdavUrl,
-		debridConfig: debridConfig,
-
-		logger: _logger,
+		Provider:  mountInfo.Name(),
+		MountPath: mountPath,
+		WebDAVURL: webdavUrl,
+		logger:    _logger,
 	}, nil
 }
 
@@ -97,7 +88,7 @@ func (m *Mount) Start(ctx context.Context) error {
 	return nil
 }
 
-func (m *Mount) Stop(ctx context.Context) error {
+func (m *Mount) Stop() error {
 	return m.Unmount()
 }
 

@@ -3,62 +3,87 @@ package dfs
 import (
 	"context"
 	"sync"
-)
+	"sync/atomic"
 
-var (
-	globalManager *Manager
-	globalOnce    sync.Once
+	"github.com/rs/zerolog"
+	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
 // Manager manages FUSE filesystem instances with proper caching
 type Manager struct {
-	mounts map[string]*Mount
-	mu     sync.RWMutex
+	mounts  map[string]*Mount
+	manager *manager.Manager
+	logger  zerolog.Logger
+	mu      sync.RWMutex
+	ready   atomic.Bool
 }
 
 // NewManager creates a new  FUSE filesystem manager
-func NewManager() *Manager {
-	globalOnce.Do(func() {
-		globalManager = &Manager{
-			mounts: make(map[string]*Mount),
+func NewManager(manager *manager.Manager) *Manager {
+	m := &Manager{
+		manager: manager,
+		logger:  logger.New("mount"),
+	}
+	m.registerMounts()
+	return m
+}
+
+func (m *Manager) registerMounts() {
+	mounts := make(map[string]*Mount)
+	_, mountPaths := m.manager.MountPaths()
+	for _, mountInfo := range mountPaths {
+		mnt, err := NewMount(mountInfo, m.manager)
+		if err != nil {
+			m.logger.Error().Err(err).Msgf("Failed to create FUSE mount for debrid: %s", mountInfo.Name())
+			continue
 		}
-	})
-	return globalManager
-}
-
-// GetGlobalManager returns the global DFS manager instance (used to avoid import cycles)
-func GetGlobalManager() *Manager {
-	return globalManager
-}
-
-// RegisterMount registers a mount instance
-func (m *Manager) RegisterMount(name string, mount *Mount) {
+		mounts[mountInfo.Name()] = mnt
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.mounts[name] = mount
-}
-
-// UnregisterMount removes a mount instance
-func (m *Manager) UnregisterMount(name string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.mounts, name)
+	m.mounts = mounts
+	m.mu.Unlock()
 }
 
 // Start starts the FUSE filesystem manager
 func (m *Manager) Start(ctx context.Context) error {
-	// This doesn't have any preparation, Mount.Start handles starting mount for each debrid
+	var wg sync.WaitGroup
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for name, mount := range m.mounts {
+		wg.Add(1)
+		go func(name string, mount *Mount) {
+			defer wg.Done()
+			if err := mount.Start(ctx); err != nil {
+				m.logger.Error().Err(err).Msgf("Failed to mount FUSE filesystem for debrid: %s", name)
+			} else {
+				m.logger.Info().Msgf("Successfully mounted FUSE filesystem for debrid: %s", name)
+			}
+		}(name, mount)
+	}
+	wg.Wait()
+	m.ready.Store(true)
 	return nil
 }
 
 // Stop stops the  FUSE filesystem manager
 func (m *Manager) Stop() error {
-	// Mounter handles this
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for name, mount := range m.mounts {
+		if err := mount.Stop(); err != nil {
+			m.logger.Error().Err(err).Msgf("Failed to unmount FUSE filesystem for debrid: %s", name)
+		} else {
+			m.logger.Info().Msgf("Successfully unmounted FUSE filesystem for debrid: %s", name)
+		}
+	}
 	return nil
 }
 
 func (m *Manager) IsReady() bool {
-	return true
+	return m.ready.Load()
 }
 
 func (m *Manager) GetStats() (map[string]interface{}, error) {
@@ -68,56 +93,21 @@ func (m *Manager) GetStats() (map[string]interface{}, error) {
 	stats := map[string]interface{}{
 		"enabled": true,
 		"ready":   true,
-		"type":    m.Type(),
 	}
 
 	// Collect stats from all registered mounts
 	if len(m.mounts) > 0 {
 		mountsInfo := make(map[string]interface{})
-		var totalCacheDirSize, totalCacheDirLimit, totalActiveReads, totalOpenedFiles int64
 
 		for name, mount := range m.mounts {
-			if mount != nil && mount.vfs != nil {
-				vfsStats := mount.vfs.GetStats()
-				mountInfo := map[string]interface{}{
-					"name":       name,
-					"mounted":    true,
-					"mount_path": mount.config.MountPath,
-					"stats":      vfsStats,
-				}
-				mountsInfo[name] = mountInfo
-
-				// Aggregate stats
-				if cacheDirSize, ok := vfsStats["cache_dir_size"].(int64); ok {
-					totalCacheDirSize += cacheDirSize
-				}
-				if cacheDirLimit, ok := vfsStats["cache_dir_limit"].(int64); ok {
-					totalCacheDirLimit += cacheDirLimit
-				}
-				if activeReads, ok := vfsStats["active_reads"].(int64); ok {
-					totalActiveReads += activeReads
-				}
-				if openedFiles, ok := vfsStats["opened_files"].(int64); ok {
-					totalOpenedFiles += openedFiles
-				}
+			mountStats := mount.Stats()
+			if mountStats != nil {
+				mountsInfo[name] = mountStats
 			}
 		}
 
 		stats["mounts"] = mountsInfo
-
-		// Add aggregated stats
-		stats["stats"] = map[string]interface{}{
-			"cache_dir_size":  totalCacheDirSize,
-			"cache_dir_limit": totalCacheDirLimit,
-			"active_reads":    totalActiveReads,
-			"opened_files":    totalOpenedFiles,
-		}
 	}
 
 	return stats, nil
-}
-
-// Type returns the type of mount manager
-func (m *Manager) Type() string {
-	return "dfs"
 }

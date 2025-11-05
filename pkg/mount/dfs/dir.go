@@ -5,17 +5,16 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
-	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/pkg/debrid/store"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs"
-	"github.com/sirrobot01/decypharr/pkg/version"
+	"github.com/sirrobot01/decypharr/pkg/storage"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -23,6 +22,7 @@ type DirLevel int
 
 const (
 	LevelRoot DirLevel = iota // This is __all__, version.txt, torrents, __bad__ and custom dirs
+	LevelPaginated
 	LevelTorrent
 	LevelFile
 )
@@ -31,7 +31,6 @@ const (
 type Dir struct {
 	fs.Inode
 	vfs           *vfs.Manager
-	debrid        *store.Cache
 	level         DirLevel
 	name          string
 	children      *xsync.Map[string, *ChildEntry] // key is the child name
@@ -39,6 +38,7 @@ type Dir struct {
 	logger        zerolog.Logger
 	populated     atomic.Bool
 	modTime       uint64
+	manager       *manager.Manager
 	populateGroup singleflight.Group // Deduplicate concurrent population requests
 }
 
@@ -53,16 +53,16 @@ var _ = (fs.NodeGetattrer)((*Dir)(nil))
 var _ = (fs.NodeUnlinker)((*Dir)(nil))
 
 // NewDir creates a new directory
-func NewDir(vfsCache *vfs.Manager, debridCache *store.Cache, name string, level DirLevel, modTime uint64, config *config.FuseConfig, logger zerolog.Logger) *Dir {
+func NewDir(vfsCache *vfs.Manager, manager *manager.Manager, name string, level DirLevel, modTime uint64, config *config.FuseConfig, logger zerolog.Logger) *Dir {
 	return &Dir{
 		vfs:      vfsCache,
-		debrid:   debridCache,
 		name:     name,
 		children: xsync.NewMap[string, *ChildEntry](),
 		level:    level,
 		config:   config,
 		logger:   logger,
 		modTime:  modTime,
+		manager:  manager,
 	}
 }
 
@@ -116,7 +116,7 @@ func (d *Dir) returnExistingChild(ctx context.Context, name string, child *Child
 	if child.node == nil {
 		if child.attr.Mode&fuse.S_IFDIR != 0 {
 			// It's a directory - create the Dir node
-			child.node = NewDir(d.vfs, d.debrid, name, d.level+1, d.modTime, d.config, d.logger)
+			child.node = NewDir(d.vfs, d.manager, name, d.level+1, d.modTime, d.config, d.logger)
 		} else {
 			// It's a file - shouldn't happen as files are always created fully
 			return nil, syscall.ENOENT
@@ -152,18 +152,18 @@ func (d *Dir) returnExistingChild(ctx context.Context, name string, child *Child
 
 // loadSingleFile loads only one specific file without populating all children
 func (d *Dir) loadSingleFile(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	// Get torrent from debrid cache
-	torrent := d.debrid.GetTorrentByName(d.name)
-	if torrent == nil {
+	// Get torrent from source
+	t, err := d.manager.GetTorrentByName(d.name)
+	if err != nil || t == nil {
 		return nil, syscall.ENOENT
 	}
 
 	// Search for the specific file
-	file, exists := torrent.GetFile(name)
-	if !exists {
+	file, exists := t.Files[name]
+	if !exists || file.Deleted {
 		return nil, syscall.ENOENT
 	}
-	d.addFile(torrent, file)
+	d.addFile(t, file)
 
 	// Now retrieve and return it
 	child, ex := d.children.Load(name)
@@ -210,12 +210,21 @@ func (d *Dir) Unlink(ctx context.Context, name string) syscall.Errno {
 	switch d.level {
 	case LevelRoot:
 		return syscall.EPERM
+	case LevelPaginated:
+		return syscall.EPERM
 	case LevelTorrent:
 		// For torrent level, check if it's a directory (torrent) that can be deleted
 		if child.attr.Mode&fuse.S_IFDIR != 0 {
-			// Delete torrent from debrid store
-			d.debrid.RemoveTorrent(name)
-			d.logger.Info().Str("name", name).Msg("Removed torrent from debrid store")
+			// Get torrent by name to find its infohash
+			t, err := d.manager.GetTorrentByName(name)
+			if err == nil && t != nil {
+				err := d.manager.DeleteTorrent(t.InfoHash)
+				if err != nil {
+					d.logger.Error().Err(err).Str("name", name).Msg("Failed to remove torrent from source")
+					return syscall.EIO
+				}
+				d.logger.Info().Str("name", name).Msg("Removed torrent from source")
+			}
 		}
 
 	case LevelFile:
@@ -226,9 +235,9 @@ func (d *Dir) Unlink(ctx context.Context, name string) syscall.Errno {
 			return syscall.EINVAL
 		}
 
-		// Remove file from debrid cache
-		if err := d.debrid.RemoveFile(fileNode.torrentName, fileNode.torrentFile.Name); err != nil {
-			d.logger.Error().Err(err).Str("file", fileNode.torrentFile.Name).Str("torrent", d.name).Msg("Failed to remove file from debrid cache")
+		// Remove file from source
+		if err := d.manager.RemoveTorrentFile(fileNode.torrentName, fileNode.torrentFile.Name); err != nil {
+			d.logger.Error().Err(err).Str("file", fileNode.torrentFile.Name).Str("torrent", d.name).Msg("Failed to remove file from source")
 			return syscall.EIO
 		}
 
@@ -258,6 +267,8 @@ func (d *Dir) populateChildren(ctx context.Context) {
 		switch d.level {
 		case LevelRoot:
 			d.populateRootChildren(ctx)
+		case LevelPaginated:
+			d.populatePaginatedChildren(ctx)
 		case LevelTorrent:
 			d.populateTorrentChildren(ctx)
 		case LevelFile:
@@ -271,84 +282,102 @@ func (d *Dir) populateChildren(ctx context.Context) {
 
 // PopulateRoot populates the root directory with initial entries
 func (d *Dir) populateRootChildren(ctx context.Context) {
-	// Add version.txt file
-	d.addVersionFile()
-
 	// Add standard directories
-	now := uint64(time.Now().Unix())
-	d.addDirectory("__all__", now)
-	d.addDirectory("torrents", now)
-	d.addDirectory("__bad__", now)
-
-	customFolders := d.debrid.GetCustomFolders()
-	for _, folder := range customFolders {
-		d.addDirectory(folder, now)
+	_, entries := d.manager.GetSubDir(d.name)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			d.addDirectory(entry.Name(), uint64(entry.ModTime().Unix()))
+		} else {
+			d.addContentFile(entry)
+		}
 	}
 }
 
 func (d *Dir) populateTorrentChildren(ctx context.Context) {
-	files := d.debrid.GetListing(d.name)
-	if files == nil {
+	_, entries := d.manager.GetChildren(d.name)
+	if entries == nil {
 		return
 	}
-	for _, file := range files {
-		if file.IsDir() {
+	for _, entry := range entries {
+		if entry.IsDir() {
 			// Just store metadata
-			name := file.Name()
+			name := entry.Name()
 			fullPath := d.name + "/" + name
 
-			entry := &ChildEntry{
+			childEntry := &ChildEntry{
 				node: nil, // Create lazily on first access
 				attr: fs.StableAttr{
 					Mode: fuse.S_IFDIR | 0755,
 					Ino:  hashPath(fullPath),
 				},
 			}
-			d.children.Store(name, entry)
+			d.children.Store(name, childEntry)
+		}
+	}
+}
+
+func (d *Dir) populatePaginatedChildren(ctx context.Context) {
+	_, entries := d.manager.GetChildrenInSubGroup(d.name)
+	if entries == nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			// Just store metadata
+			name := entry.Name()
+			fullPath := d.name + "/" + name
+
+			childEntry := &ChildEntry{
+				node: nil, // Create lazily on first access
+				attr: fs.StableAttr{
+					Mode: fuse.S_IFDIR | 0755,
+					Ino:  hashPath(fullPath),
+				},
+			}
+			d.children.Store(name, childEntry)
 		}
 	}
 }
 
 func (d *Dir) populateFileChildren(ctx context.Context) {
-	// Get files for this torrent from your debrid cache
-	torrent := d.debrid.GetTorrentByName(d.name)
-	if torrent == nil {
+	// Get files for this torrent from source
+	t, err := d.manager.GetTorrentByName(d.name)
+	if err != nil || t == nil {
 		return
 	}
 
-	files := torrent.GetFiles()
-
-	for _, file := range files {
-		d.addFile(torrent, file)
+	// Iterate over files map
+	for _, file := range t.Files {
+		if !file.Deleted {
+			d.addFile(t, file)
+		}
 	}
 }
 
-func (d *Dir) addVersionFile() {
-	vs := version.GetInfo().String()
-	content := []byte(vs + "\n")
+func (d *Dir) addContentFile(entry manager.FileInfo) {
 	fileNode := newFile(
 		d.vfs,
 		d.config,
 		"",
-		types.File{Name: "version.txt", Size: int64(len(content))},
-		time.Now(),
-		content,
+		types.File{Name: entry.Name(), Size: entry.Size()},
+		entry.ModTime(),
+		entry.Content(),
 		d.logger,
 	)
 
-	entry := &ChildEntry{
+	childEntry := &ChildEntry{
 		node: fileNode,
 		attr: fs.StableAttr{
 			Mode: fuse.S_IFREG | 0644,
-			Ino:  hashPath("version.txt"),
+			Ino:  hashPath(entry.Name()),
 		},
 	}
 
-	d.children.Store("version.txt", entry)
+	d.children.Store(entry.Name(), childEntry)
 }
 
 func (d *Dir) addDirectory(name string, modTime uint64) {
-	dirNode := NewDir(d.vfs, d.debrid, name, d.level+1, modTime, d.config, d.logger)
+	dirNode := NewDir(d.vfs, d.manager, name, d.level+1, modTime, d.config, d.logger)
 
 	// Hash full path to ensure unique inodes
 	fullPath := d.name + "/" + name
@@ -364,13 +393,22 @@ func (d *Dir) addDirectory(name string, modTime uint64) {
 	d.children.Store(name, entry)
 }
 
-func (d *Dir) addFile(torrent *store.CachedTorrent, torrentFile types.File) {
+func (d *Dir) addFile(t *storage.Torrent, file *storage.File) {
 	// Create file node based on your file info
 	torrentName := internString(d.name)
-	fileNode := newFile(d.vfs, d.config, torrentName, torrentFile, torrent.AddedOn, nil, d.logger)
+
+	// Convert torrent.File to types.File for compatibility with existing file node
+	typesFile := types.File{
+		Name:      file.Name,
+		Size:      file.Size,
+		IsRar:     file.IsRar,
+		ByteRange: file.ByteRange,
+	}
+
+	fileNode := newFile(d.vfs, d.config, torrentName, typesFile, t.AddedOn, nil, d.logger)
 
 	// Hash full path to ensure unique inodes
-	fullPath := d.name + "/" + torrentFile.Name
+	fullPath := d.name + "/" + file.Name
 
 	entry := &ChildEntry{
 		node: fileNode,
@@ -380,5 +418,5 @@ func (d *Dir) addFile(torrent *store.CachedTorrent, torrentFile types.File) {
 		},
 	}
 
-	d.children.Store(torrentFile.Name, entry)
+	d.children.Store(file.Name, entry)
 }

@@ -3,7 +3,6 @@ package utils
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/base32"
 	"encoding/hex"
 	"fmt"
@@ -13,11 +12,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/internal/request"
 )
 
 var (
@@ -215,48 +212,6 @@ func processInfoHash(input string) (string, error) {
 
 	// If we get here, it's not a valid infohash and we couldn't convert it
 	return "", fmt.Errorf("invalid infohash: %s", input)
-}
-
-func GetInfohashFromURL(url string) (string, error) {
-	// Download the torrent file
-	var magnetLink string
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	redirectFunc := func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 3 {
-			return fmt.Errorf("stopped after 3 redirects")
-		}
-		if strings.HasPrefix(req.URL.String(), "magnet:") {
-			// Stop the redirect chain
-			magnetLink = req.URL.String()
-			return http.ErrUseLastResponse
-		}
-		return nil
-	}
-	client := request.New(
-		request.WithTimeout(30*time.Second),
-		request.WithRedirectPolicy(redirectFunc),
-	)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if magnetLink != "" {
-		return ExtractInfoHash(magnetLink), nil
-	}
-
-	mi, err := metainfo.Load(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	hash := mi.HashInfoBytes()
-	infoHash := hash.HexString()
-	return infoHash, nil
 }
 
 func ConstructMagnet(infoHash, name string) *Magnet {

@@ -10,7 +10,6 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/pkg/debrid/store"
 )
 
 type Mount struct {
@@ -19,9 +18,9 @@ type Mount struct {
 	logger     zerolog.Logger
 }
 
-func NewMount(debridCache *store.Cache) (*Mount, error) {
+func NewMount(debridConfig config.Debrid) (*Mount, error) {
 	return &Mount{
-		config:     debridCache.GetConfig(),
+		config:     debridConfig,
 		httpClient: http.DefaultClient,
 		logger:     logger.New("rclone-external"),
 	}, nil
@@ -31,7 +30,15 @@ func (m *Mount) Start(ctx context.Context) error {
 	return nil
 }
 
-func (m *Mount) Stop(ctx context.Context) error {
+func (m *Mount) Stats() map[string]interface{} {
+	return map[string]interface{}{
+		"enabled": true,
+		"ready":   true,
+		"type":    m.Type(),
+	}
+}
+
+func (m *Mount) Stop() error {
 	return nil
 }
 

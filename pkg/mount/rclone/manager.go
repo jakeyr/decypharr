@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
 const (
@@ -32,8 +33,11 @@ type Manager struct {
 	cancel        context.CancelFunc
 	httpClient    *http.Client
 	serverReady   chan struct{}
+	mountReady    chan struct{}
 	serverStarted bool
 	mu            sync.RWMutex
+	mounts        map[string]*Mount
+	manager       *manager.Manager
 }
 
 type MountInfo struct {
@@ -57,7 +61,7 @@ type RCResponse struct {
 }
 
 // NewManager creates a new rclone RC manager
-func NewManager() *Manager {
+func NewManager(manager *manager.Manager) *Manager {
 	cfg := config.Get()
 	configDir := filepath.Join(cfg.Path, "rclone")
 
@@ -69,14 +73,34 @@ func NewManager() *Manager {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &Manager{
+	m := &Manager{
 		configDir:   configDir,
 		logger:      logger.New("rclone"),
 		ctx:         ctx,
 		cancel:      cancel,
 		httpClient:  &http.Client{Timeout: 60 * time.Second},
 		serverReady: make(chan struct{}),
+		mountReady:  make(chan struct{}),
+		manager:     manager,
 	}
+	m.registerMounts()
+	return m
+}
+
+func (m *Manager) registerMounts() {
+	mounts := make(map[string]*Mount)
+	_, mountPaths := m.manager.MountPaths()
+	for _, mountInfo := range mountPaths {
+		mnt, err := NewMount(mountInfo, m.manager, m.logger)
+		if err != nil {
+			m.logger.Error().Err(err).Msgf("Failed to create rclone mount for debrid: %s", mountInfo.Name())
+			continue
+		}
+		mounts[mountInfo.Name()] = mnt
+	}
+	m.mu.Lock()
+	m.mounts = mounts
+	m.mu.Unlock()
 }
 
 // Start starts the rclone RC server
@@ -147,6 +171,31 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.waitForServer()
 		close(m.serverReady)
 
+		// Start mounting here now
+
+		if err := m.waitForReady(30 * time.Second); err != nil {
+			m.logger.Error().Err(err).Msg("Rclone RC server did not become ready in time")
+			return
+		}
+
+		// Start all mounts
+		m.mu.RLock()
+		var wg sync.WaitGroup
+		for name, mount := range m.mounts {
+			wg.Add(1)
+			go func(name string, mount *Mount) {
+				defer wg.Done()
+				if err := mount.Start(m.ctx); err != nil {
+					m.logger.Error().Err(err).Msgf("Failed to mount rclone filesystem for debrid: %s", name)
+				} else {
+					m.logger.Info().Msgf("Successfully mounted rclone filesystem for debrid: %s", name)
+				}
+			}(name, mount)
+		}
+		m.mu.RUnlock()
+		wg.Wait()
+		close(m.mountReady)
+
 		// Wait for command to finish and log output
 		err := m.cmd.Wait()
 		switch {
@@ -175,7 +224,7 @@ func (m *Manager) Start(ctx context.Context) error {
 }
 
 // Stop stops the rclone RC server and unmounts all mounts
-func (m *Manager) Stop() error {
+func (m *Manager) Stop(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -223,6 +272,24 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
+// IsReady returns true if the RC server is ready
+func (m *Manager) IsReady() bool {
+	select {
+	case <-m.serverReady:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Manager) GetLogger() zerolog.Logger {
+	return m.logger
+}
+
+func (m *Manager) Type() string {
+	return "rclone"
+}
+
 // waitForServer waits for the RC server to become available
 func (m *Manager) waitForServer() {
 	maxAttempts := 30
@@ -249,16 +316,6 @@ func pingServer() bool {
 	return err == nil
 }
 
-// IsReady returns true if the RC server is ready
-func (m *Manager) IsReady() bool {
-	select {
-	case <-m.serverReady:
-		return true
-	default:
-		return false
-	}
-}
-
 // waitForReady waits for the RC server to be ready
 func (m *Manager) waitForReady(timeout time.Duration) error {
 	select {
@@ -269,12 +326,4 @@ func (m *Manager) waitForReady(timeout time.Duration) error {
 	case <-m.ctx.Done():
 		return m.ctx.Err()
 	}
-}
-
-func (m *Manager) GetLogger() zerolog.Logger {
-	return m.logger
-}
-
-func (m *Manager) Type() string {
-	return "rclone"
 }

@@ -1,5 +1,9 @@
 package qbit
 
+import (
+	"github.com/sirrobot01/decypharr/pkg/storage"
+)
+
 type BuildInfo struct {
 	Libtorrent string `json:"libtorrent"`
 	Bitness    int    `json:"bitness"`
@@ -352,4 +356,71 @@ func getAppPreferences() *AppPreferences {
 		WebUiUseCustomHttpHeadersEnabled: false,
 	}
 	return preferences
+}
+
+type Torrent struct {
+	Hash         string         `json:"hash"`
+	Name         string         `json:"name"`
+	Size         int64          `json:"size"`
+	Progress     float64        `json:"progress"`
+	Dlspeed      int64          `json:"dlspeed"`
+	Eta          int64          `json:"eta"`
+	NumSeeds     int            `json:"num_seeds"`
+	State        string         `json:"state"`
+	Category     string         `json:"category"`
+	SavePath     string         `json:"save_path"`
+	ContentPath  string         `json:"content_path"`
+	AddedOn      int64          `json:"added_on"`
+	CompletionOn int64          `json:"completion_on"`
+	Debrid       string         `json:"debrid"`
+	DebridID     string         `json:"debrid_id"`
+	AmountLeft   int64          `json:"amount_left"`
+	Downloaded   int64          `json:"downloaded"`
+	MagnetURI    string         `json:"magnet_uri"`
+	Files        []*TorrentFile `json:"files"`
+}
+
+type TorrentFile struct {
+	Index        int     `json:"index,omitempty"`
+	Name         string  `json:"name,omitempty"`
+	Size         int64   `json:"size,omitempty"`
+	Progress     int     `json:"progress,omitempty"`
+	Priority     int     `json:"priority,omitempty"`
+	IsSeed       bool    `json:"is_seed,omitempty"`
+	PieceRange   []int   `json:"piece_range,omitempty"`
+	Availability float64 `json:"availability,omitempty"`
+}
+
+// ToQBitTorrent converts to QBitTorrent format for API compatibility
+func convertToQBitTorrentTorrent(t *storage.Torrent) Torrent {
+	qbitTorrent := Torrent{
+		Hash:         t.InfoHash,
+		Name:         t.Name,
+		Size:         t.Size,
+		Progress:     t.Progress,
+		Dlspeed:      t.Speed,
+		Eta:          int64(0), // ETA not tracked
+		NumSeeds:     t.Seeders,
+		State:        t.State,
+		Category:     t.Category,
+		SavePath:     t.SavePath,
+		ContentPath:  t.ContentPath,
+		AddedOn:      t.CreatedAt.Unix(),
+		CompletionOn: 0,
+		Debrid:       t.ActiveDebrid,
+		DebridID:     "",
+		AmountLeft:   int64(float64(t.Size) * (1 - t.Progress)),
+		Downloaded:   int64(float64(t.Size) * t.Progress),
+		MagnetURI:    t.Magnet,
+	}
+	index := 0
+	for _, f := range t.Files {
+		qbitTorrent.Files = append(qbitTorrent.Files, &TorrentFile{
+			Name:  f.Name,
+			Size:  f.Size,
+			Index: index,
+		})
+		index++
+	}
+	return qbitTorrent
 }

@@ -7,7 +7,7 @@ import (
 
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/debrid/common"
-	"github.com/sirrobot01/decypharr/pkg/debrid/store"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
 func fileIsSymlinked(file string) bool {
@@ -86,9 +86,8 @@ func collectFiles(media arr.Content) map[string][]arr.ContentFile {
 	return uniqueParents
 }
 
-func (r *Repair) checkTorrentFiles(torrentPath string, files []arr.ContentFile, clients map[string]common.Client, caches map[string]*store.Cache) []arr.ContentFile {
+func (r *Repair) checkTorrentFiles(torrentPath string, files []arr.ContentFile, clients map[string]common.Client, mgr *manager.Manager) []arr.ContentFile {
 	brokenFiles := make([]arr.ContentFile, 0)
-
 	emptyFiles := make([]arr.ContentFile, 0)
 
 	r.logger.Debug().Msgf("Checking %s", torrentPath)
@@ -101,24 +100,11 @@ func (r *Repair) checkTorrentFiles(torrentPath string, files []arr.ContentFile, 
 		return emptyFiles
 	}
 
-	cache, ok := caches[debridName]
-	if !ok {
-		r.logger.Debug().Msgf("No cache found for %s. Skipping", debridName)
-		return emptyFiles
-	}
-	tor, ok := r.torrentsMap.Load(debridName)
-	if !ok {
-		r.logger.Debug().Msgf("Could not find torrents for %s. Skipping", debridName)
-		return emptyFiles
-	}
-
-	torrentsMap := tor.(map[string]store.CachedTorrent)
-
-	// Check if torrent exists
+	// Check if torrent exists in manager
 	torrentName := filepath.Clean(filepath.Base(torrentPath))
-	torrent, ok := torrentsMap[torrentName]
-	if !ok {
-		r.logger.Debug().Msgf("Can't find torrent %s in %s. Marking as broken", torrentName, debridName)
+	torrent, err := mgr.GetTorrentByName(torrentName)
+	if err != nil {
+		r.logger.Debug().Msgf("Can't find torrent %s in manager. Marking as broken", torrentName)
 		// Return all files as broken
 		return files
 	}
@@ -129,7 +115,7 @@ func (r *Repair) checkTorrentFiles(torrentPath string, files []arr.ContentFile, 
 		filePaths[i] = file.TargetPath
 	}
 
-	brokenFilePaths := cache.GetBrokenFiles(&torrent, filePaths)
+	brokenFilePaths := mgr.GetBrokenFiles(torrent, filePaths)
 	if len(brokenFilePaths) > 0 {
 		r.logger.Debug().Msgf("%d broken files found in %s", len(brokenFilePaths), torrentName)
 
@@ -158,13 +144,13 @@ func (r *Repair) findDebridForPath(dir string, clients map[string]common.Client)
 
 	// Find debrid client
 	for _, client := range clients {
-		mountPath := client.GetMountPath()
+		mountPath := client.Config().Folder
 		if mountPath == "" {
 			continue
 		}
 
 		if filepath.Clean(mountPath) == filepath.Clean(dir) {
-			debridName := client.Name()
+			debridName := client.Config().Name
 
 			// Cache the result
 			r.debridPathCache.Store(dir, debridName)

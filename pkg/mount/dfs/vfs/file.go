@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
-	"github.com/sirrobot01/decypharr/pkg/debrid/store"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs/ranges"
 )
 
@@ -33,7 +33,7 @@ type downloadJob struct {
 	completed  bool
 
 	// Progressive download support
-	bytesDownloaded atomic.Int64 // How much has been downloaded so far
+	bytesDownloaded atomic.Int64  // How much has been downloaded so far
 	minThreshold    int64         // Minimum bytes before early return
 	thresholdReady  chan struct{} // Signals when minThreshold is reached
 	thresholdOnce   sync.Once     // Ensures threshold signal sent only once
@@ -56,7 +56,6 @@ type File struct {
 	rangesOnce sync.Once      // Ensures ranges are loaded exactly once
 
 	// Download configuration
-	debrid    *store.Cache
 	readAhead int64
 
 	// Active downloads tracking
@@ -64,7 +63,7 @@ type File struct {
 
 	// Stats and lifecycle
 	stats           *StatsTracker
-	manager         *Manager // Reference to save metadata
+	manager         *manager.Manager // Reference to save metadata
 	lastAccess      time.Time
 	modTime         time.Time
 	dirty           bool // Has unflushed changes to metadata
@@ -81,7 +80,7 @@ type File struct {
 type SparseFile = File
 
 // newFile creates or opens a cached file with download capabilities
-func newFile(cacheDir string, debridCache *store.Cache, torrentName string, torrentFile types.File, chunkSize, readAhead int64, stats *StatsTracker, manager *Manager) (*File, error) {
+func newFile(cacheDir string, torrentName string, torrentFile types.File, chunkSize, readAhead int64, stats *StatsTracker, manager *manager.Manager) (*File, error) {
 	sanitizedFileName := sanitizeForPath(torrentFile.Name)
 	torrentDir := filepath.Join(cacheDir, sanitizeForPath(torrentName))
 	cachePath := filepath.Join(torrentDir, sanitizedFileName)
@@ -112,7 +111,6 @@ func newFile(cacheDir string, debridCache *store.Cache, torrentName string, torr
 		chunkSize:   chunkSize,
 		file:        file,
 		ranges:      nil, // Lazy-loaded via rangesOnce
-		debrid:      debridCache,
 		readAhead:   readAhead,
 		downloading: xsync.NewMap[int64, *downloadJob](),
 		stats:       stats,
@@ -127,14 +125,14 @@ func newFile(cacheDir string, debridCache *store.Cache, torrentName string, torr
 }
 
 // newSparseFile is a compatibility wrapper for existing code
-func newSparseFile(cacheDir, torrentName, fileName string, size, chunkSize int64, stats *StatsTracker, manager *Manager) (*SparseFile, error) {
+func newSparseFile(cacheDir, torrentName, fileName string, size, chunkSize int64, stats *StatsTracker, manager *manager.Manager) (*SparseFile, error) {
 	// Create a minimal File for backward compatibility
 	torrentFile := types.File{
 		Name: fileName,
 		Size: size,
 		Link: "", // Not needed for basic sparse file operations
 	}
-	return newFile(cacheDir, nil, torrentName, torrentFile, chunkSize, 0, stats, manager)
+	return newFile(cacheDir, torrentName, torrentFile, chunkSize, 0, stats, manager)
 }
 
 // loadRanges lazy-loads ranges by scanning the actual file
@@ -198,9 +196,9 @@ func (f *SparseFile) scanExistingData() error {
 }
 
 // saveMetadata persists the current state to disk
-func (f *SparseFile) saveMetadata() error {
+func (f *SparseFile) getMetadata() (*Metadata, error) {
 	if f.manager == nil || f.ranges == nil {
-		return nil
+		return nil, nil
 	}
 
 	meta := &Metadata{
@@ -211,12 +209,7 @@ func (f *SparseFile) saveMetadata() error {
 		Fingerprint: "", // Could add ETag/hash here
 		Dirty:       f.dirty,
 	}
-
-	if err := f.manager.saveMetadata(f.torrentName, f.fileName, meta); err != nil {
-		return fmt.Errorf("save metadata: %w", err)
-	}
-
-	return nil
+	return meta, nil
 }
 
 // ReadAt reads from cache if data is available, returns false if not cached
@@ -428,23 +421,6 @@ func (f *SparseFile) IsCached(offset, length int64) bool {
 // ============================================================================
 // Download Methods (merged from Reader)
 // ============================================================================
-
-// getDownloadLink retrieves the download link for this file
-func (f *File) getDownloadLink() (types.DownloadLink, error) {
-	if f.debrid == nil {
-		return types.DownloadLink{}, fmt.Errorf("no debrid client configured")
-	}
-
-	downloadLink, err := f.debrid.GetDownloadLink(f.torrentName, f.fileName, f.fileLink)
-	if err != nil {
-		return downloadLink, err
-	}
-	err = downloadLink.Valid()
-	if err != nil {
-		return types.DownloadLink{}, err
-	}
-	return downloadLink, nil
-}
 
 // ReadAtWithDownload reads data with progressive download for instant playback start
 // Downloads minimum threshold (512KB) then returns immediately while continuing in background
@@ -717,7 +693,7 @@ func (f *File) doDownloadProgressive(ctx context.Context, job *downloadJob) erro
 // doDownloadWithJob performs the actual HTTP download with optional progressive signaling
 func (f *File) doDownloadWithJob(ctx context.Context, offset, size int64, job *downloadJob) error {
 	end := offset + size - 1
-	rc, err := f.debrid.StreamReader(ctx, offset, end, f.getDownloadLink)
+	rc, err := f.manager.StreamReader(ctx, f.torrentName, f.fileName, offset, end)
 	if err != nil {
 		return fmt.Errorf("get download link: %w", err)
 	}

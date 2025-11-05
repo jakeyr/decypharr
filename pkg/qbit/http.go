@@ -8,6 +8,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 func (q *QBit) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +44,6 @@ func (q *QBit) handleWebAPIVersion(w http.ResponseWriter, r *http.Request) {
 func (q *QBit) handlePreferences(w http.ResponseWriter, r *http.Request) {
 	preferences := getAppPreferences()
 
-	preferences.WebUiUsername = q.Username
 	preferences.SavePath = q.DownloadFolder
 	preferences.TempPath = filepath.Join(q.DownloadFolder, "temp")
 
@@ -70,10 +70,17 @@ func (q *QBit) handleTorrentsInfo(w http.ResponseWriter, r *http.Request) {
 	//log all url params
 	ctx := r.Context()
 	category := getCategory(ctx)
-	filter := strings.Trim(r.URL.Query().Get("filter"), "")
+	state := strings.Trim(r.URL.Query().Get("filter"), "")
 	hashes := getHashes(ctx)
-	torrents := q.storage.GetAllSorted(category, filter, hashes, "added_on", false)
-	request.JSONResponse(w, torrents, http.StatusOK)
+
+	// Convert hashes to filter function
+
+	torrents := q.manager.Queue().ListFilter(category, state, hashes, "added_on", false)
+	qbitTorrents := make([]Torrent, len(torrents))
+	for i, t := range torrents {
+		qbitTorrents[i] = convertToQBitTorrentTorrent(t)
+	}
+	request.JSONResponse(w, qbitTorrents, http.StatusOK)
 }
 
 func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
@@ -163,9 +170,13 @@ func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No hashes provided", http.StatusBadRequest)
 		return
 	}
-	category := getCategory(ctx)
 	for _, hash := range hashes {
-		q.storage.Delete(hash, category, false)
+		err := q.manager.Queue().Delete(hash, getCategory(ctx), nil)
+		if err != nil {
+			q.logger.Warn().Err(err).Msgf("Error deleting torrent")
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -176,11 +187,11 @@ func (q *QBit) handleTorrentsPause(w http.ResponseWriter, r *http.Request) {
 	hashes := getHashes(ctx)
 	category := getCategory(ctx)
 	for _, hash := range hashes {
-		torrent := q.storage.Get(hash, category)
-		if torrent == nil {
+		torr, err := q.manager.Queue().GetTorrent(hash, category)
+		if err != nil {
 			continue
 		}
-		go q.PauseTorrent(torrent)
+		go q.PauseTorrent(torr)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -191,11 +202,11 @@ func (q *QBit) handleTorrentsResume(w http.ResponseWriter, r *http.Request) {
 	hashes := getHashes(ctx)
 	category := getCategory(ctx)
 	for _, hash := range hashes {
-		torrent := q.storage.Get(hash, category)
-		if torrent == nil {
+		torr, err := q.manager.Queue().GetTorrent(hash, category)
+		if err != nil {
 			continue
 		}
-		go q.ResumeTorrent(torrent)
+		go q.ResumeTorrent(torr)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -206,11 +217,11 @@ func (q *QBit) handleTorrentRecheck(w http.ResponseWriter, r *http.Request) {
 	hashes := getHashes(ctx)
 	category := getCategory(ctx)
 	for _, hash := range hashes {
-		torrent := q.storage.Get(hash, category)
-		if torrent == nil {
+		torr, err := q.manager.Queue().GetTorrent(hash, category)
+		if err != nil {
 			continue
 		}
-		go q.RefreshTorrent(torrent)
+		go q.RefreshTorrent(torr)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -249,30 +260,54 @@ func (q *QBit) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 func (q *QBit) handleTorrentProperties(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	hash := r.URL.Query().Get("hash")
-	torrent := q.storage.Get(hash, getCategory(ctx))
+	category := getCategory(ctx)
+	torr, err := q.manager.Queue().GetTorrent(hash, category)
+	if err != nil {
+		http.Error(w, "Torrent not found", http.StatusNotFound)
+		return
+	}
 
-	properties := q.GetTorrentProperties(torrent)
+	properties := q.GetTorrentProperties(torr)
 	request.JSONResponse(w, properties, http.StatusOK)
 }
 
 func (q *QBit) handleTorrentFiles(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	hash := r.URL.Query().Get("hash")
-	torrent := q.storage.Get(hash, getCategory(ctx))
-	if torrent == nil {
+	torr, err := q.manager.Queue().GetTorrent(hash, getCategory(ctx))
+	if err != nil {
+		http.Error(w, "Torrent not found", http.StatusNotFound)
 		return
 	}
-	request.JSONResponse(w, torrent.Files, http.StatusOK)
+	request.JSONResponse(w, torr.Files, http.StatusOK)
 }
 
 func (q *QBit) handleSetCategory(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	category := getCategory(ctx)
 	hashes := getHashes(ctx)
-	torrents := q.storage.GetAll("", "", hashes)
-	for _, torrent := range torrents {
-		torrent.Category = category
-		q.storage.AddOrUpdate(torrent)
+	var filterFunc func(t *storage.Torrent) bool
+
+	hashSet := make(map[string]bool)
+	if len(hashes) > 0 {
+		for _, h := range hashes {
+			hashSet[h] = true
+		}
+
+	}
+
+	updateFunc := func(t *storage.Torrent) bool {
+		if t.Category != category {
+			t.Category = category
+			return true
+		}
+		return false
+	}
+
+	if err := q.manager.Queue().UpdateWhere(filterFunc, updateFunc); err != nil {
+		q.logger.Warn().Err(err).Msgf("Error adding torrent")
+		http.Error(w, "Failed to update torrents", http.StatusInternalServerError)
+		return
 	}
 	request.JSONResponse(w, nil, http.StatusOK)
 }
@@ -289,7 +324,7 @@ func (q *QBit) handleAddTorrentTags(w http.ResponseWriter, r *http.Request) {
 	for i, tag := range tags {
 		tags[i] = strings.TrimSpace(tag)
 	}
-	torrents := q.storage.GetAll("", "", hashes)
+	torrents := q.manager.Queue().ListFilter("", "", hashes, "", false)
 	for _, t := range torrents {
 		q.setTorrentTags(t, tags)
 	}
@@ -308,9 +343,9 @@ func (q *QBit) handleRemoveTorrentTags(w http.ResponseWriter, r *http.Request) {
 	for i, tag := range tags {
 		tags[i] = strings.TrimSpace(tag)
 	}
-	torrents := q.storage.GetAll("", "", hashes)
-	for _, torrent := range torrents {
-		q.removeTorrentTags(torrent, tags)
+	torrents := q.manager.Queue().ListFilter("", "", hashes, "", false)
+	for _, torr := range torrents {
+		q.removeTorrentTags(torr, tags)
 
 	}
 	request.JSONResponse(w, nil, http.StatusOK)

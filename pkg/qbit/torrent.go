@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
-	"strings"
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
-	"github.com/sirrobot01/decypharr/pkg/wire"
+	"github.com/sirrobot01/decypharr/pkg/manager"
+	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 // All torrent-related helpers goes here
@@ -19,11 +19,10 @@ func (q *QBit) addMagnet(ctx context.Context, url string, arr *arr.Arr, debrid s
 	if err != nil {
 		return fmt.Errorf("error parsing magnet link: %w", err)
 	}
-	_store := wire.Get()
 
-	importReq := wire.NewImportRequest(debrid, q.DownloadFolder, magnet, arr, action, false, "", wire.ImportTypeQBitTorrent, false)
+	importReq := manager.NewImportRequest(debrid, q.DownloadFolder, magnet, arr, action, false, "", manager.ImportTypeQBitTorrent, false)
 
-	err = _store.AddTorrent(ctx, importReq)
+	err = q.manager.AddTorrent(ctx, importReq)
 	if err != nil {
 		return fmt.Errorf("failed to process torrent: %w", err)
 	}
@@ -38,76 +37,69 @@ func (q *QBit) addTorrent(ctx context.Context, fileHeader *multipart.FileHeader,
 	if err != nil {
 		return fmt.Errorf("error reading file: %s \n %w", fileHeader.Filename, err)
 	}
-	_store := wire.Get()
-	importReq := wire.NewImportRequest(debrid, q.DownloadFolder, magnet, arr, action, false, "", wire.ImportTypeQBitTorrent, false)
-	err = _store.AddTorrent(ctx, importReq)
+	importReq := manager.NewImportRequest(debrid, q.DownloadFolder, magnet, arr, action, false, "", manager.ImportTypeQBitTorrent, false)
+	err = q.manager.AddTorrent(ctx, importReq)
 	if err != nil {
 		return fmt.Errorf("failed to process torrent: %w", err)
 	}
 	return nil
 }
 
-func (q *QBit) ResumeTorrent(t *wire.Torrent) bool {
+func (q *QBit) ResumeTorrent(t *storage.Torrent) bool {
 	return true
 }
 
-func (q *QBit) PauseTorrent(t *wire.Torrent) bool {
+func (q *QBit) PauseTorrent(t *storage.Torrent) bool {
 	return true
 }
 
-func (q *QBit) RefreshTorrent(t *wire.Torrent) bool {
+func (q *QBit) RefreshTorrent(t *storage.Torrent) bool {
 	return true
 }
 
-func (q *QBit) GetTorrentProperties(t *wire.Torrent) *TorrentProperties {
+func (q *QBit) GetTorrentProperties(t *storage.Torrent) *TorrentProperties {
 	return &TorrentProperties{
-		AdditionDate:           t.AddedOn,
-		Comment:                "Debrid Blackhole <https://github.com/sirrobot01/decypharr>",
-		CreatedBy:              "Debrid Blackhole <https://github.com/sirrobot01/decypharr>",
-		CreationDate:           t.AddedOn,
-		DlLimit:                -1,
-		UpLimit:                -1,
-		DlSpeed:                t.Dlspeed,
-		UpSpeed:                t.Upspeed,
-		TotalSize:              t.Size,
-		TotalUploaded:          t.Uploaded,
-		TotalDownloaded:        t.Downloaded,
-		TotalUploadedSession:   t.UploadedSession,
-		TotalDownloadedSession: t.DownloadedSession,
-		LastSeen:               time.Now().Unix(),
-		NbConnectionsLimit:     100,
-		Peers:                  0,
-		PeersTotal:             2,
-		SeedingTime:            1,
-		Seeds:                  100,
-		ShareRatio:             100,
+		AdditionDate:       t.AddedOn.Unix(),
+		Comment:            "Debrid Blackhole <https://github.com/sirrobot01/decypharr>",
+		CreatedBy:          "Debrid Blackhole <https://github.com/sirrobot01/decypharr>",
+		CreationDate:       t.AddedOn.Unix(),
+		DlLimit:            -1,
+		UpLimit:            -1,
+		DlSpeed:            t.Speed,
+		UpSpeed:            t.Speed,
+		TotalSize:          t.Size,
+		TotalUploaded:      t.Bytes,
+		TotalDownloaded:    t.Bytes,
+		LastSeen:           time.Now().Unix(),
+		NbConnectionsLimit: 100,
+		Peers:              0,
+		PeersTotal:         2,
+		SeedingTime:        1,
+		Seeds:              100,
+		ShareRatio:         100,
 	}
 }
 
-func (q *QBit) setTorrentTags(t *wire.Torrent, tags []string) bool {
-	torrentTags := strings.Split(t.Tags, ",")
+func (q *QBit) setTorrentTags(t *storage.Torrent, tags []string) {
 	for _, tag := range tags {
 		if tag == "" {
 			continue
 		}
-		if !utils.Contains(torrentTags, tag) {
-			torrentTags = append(torrentTags, tag)
+		if !utils.Contains(t.Tags, tag) {
+			t.Tags = append(t.Tags, tag)
 		}
 		if !utils.Contains(q.Tags, tag) {
 			q.Tags = append(q.Tags, tag)
 		}
 	}
-	t.Tags = strings.Join(torrentTags, ",")
-	q.storage.Update(t)
-	return true
+	_ = q.manager.Queue().Update(t)
 }
 
-func (q *QBit) removeTorrentTags(t *wire.Torrent, tags []string) bool {
-	torrentTags := strings.Split(t.Tags, ",")
-	newTorrentTags := utils.RemoveItem(torrentTags, tags...)
+func (q *QBit) removeTorrentTags(t *storage.Torrent, tags []string) bool {
+	newTorrentTags := utils.RemoveItem(t.Tags, tags...)
 	q.Tags = utils.RemoveItem(q.Tags, tags...)
-	t.Tags = strings.Join(newTorrentTags, ",")
-	q.storage.Update(t)
+	t.Tags = newTorrentTags
+	_ = q.manager.Queue().Update(t)
 	return true
 }
 

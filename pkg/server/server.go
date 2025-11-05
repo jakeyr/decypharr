@@ -2,26 +2,75 @@ package server
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/gorilla/sessions"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/pkg/manager"
+	"github.com/sirrobot01/decypharr/pkg/repair"
 )
 
-type Server struct {
-	router *chi.Mux
-	logger zerolog.Logger
+//go:embed templates/*
+var content embed.FS
+
+//go:embed assets/build/*
+var assetsEmbed embed.FS
+
+//go:embed assets/images/*
+var imagesEmbed embed.FS
+
+type AddRequest struct {
+	Url        string   `json:"url"`
+	Arr        string   `json:"arr"`
+	File       string   `json:"file"`
+	NotSymlink bool     `json:"notSymlink"`
+	Content    string   `json:"content"`
+	Seasons    []string `json:"seasons"`
+	Episodes   []string `json:"episodes"`
 }
 
-func New(handlers map[string]http.Handler) *Server {
+type ArrResponse struct {
+	Name string `json:"name"`
+	Url  string `json:"url"`
+}
+
+type ContentResponse struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Type  string `json:"type"`
+	ArrID string `json:"arr"`
+}
+
+type RepairRequest struct {
+	ArrName     string   `json:"arr"`
+	MediaIds    []string `json:"mediaIds"`
+	AutoProcess bool     `json:"autoProcess"`
+}
+
+type Server struct {
+	router      *chi.Mux
+	logger      zerolog.Logger
+	manager     *manager.Manager
+	repair      *repair.Repair
+	cookie      *sessions.CookieStore
+	templates   *template.Template
+	urlBase     string
+	restartFunc func()
+}
+
+func New(routes map[string]http.Handler, mgr *manager.Manager, repair *repair.Repair) *Server {
 	l := logger.New("http")
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
@@ -30,13 +79,42 @@ func New(handlers map[string]http.Handler) *Server {
 
 	cfg := config.Get()
 
+	templates := template.Must(template.ParseFS(
+		content,
+		"templates/layout.html",
+		"templates/setup_layout.html",
+		"templates/index.html",
+		"templates/download.html",
+		"templates/repair.html",
+		"templates/stats.html",
+		"templates/config.html",
+		"templates/browse.html",
+		"templates/login.html",
+		"templates/register.html",
+		"templates/setup.html",
+	))
+	cookieStore := sessions.NewCookieStore([]byte(cfg.SecretKey()))
+	cookieStore.Options = &sessions.Options{
+		Path:     "/",
+		MaxAge:   86400 * 7,
+		HttpOnly: false,
+	}
+
 	s := &Server{
-		logger: l,
+		logger:    l,
+		manager:   mgr,
+		repair:    repair,
+		cookie:    cookieStore,
+		templates: templates,
+		urlBase:   cfg.URLBase,
 	}
 
 	r.Route(cfg.URLBase, func(r chi.Router) {
-		for pattern, handler := range handlers {
-			r.Mount(pattern, handler)
+		// Mount web routes
+		r.Mount("/", s.WebRoutes())
+
+		for path, handler := range routes {
+			r.Mount(path, handler)
 		}
 
 		//logs
@@ -56,6 +134,19 @@ func New(handlers map[string]http.Handler) *Server {
 	})
 	s.router = r
 	return s
+}
+
+func (s *Server) SetRestartFunc(restartFunc func()) {
+	s.restartFunc = restartFunc
+}
+
+func (s *Server) Restart() {
+	if s.restartFunc != nil {
+		time.Sleep(200 * time.Millisecond)
+		s.restartFunc()
+	} else {
+		s.logger.Warn().Msg("Restart function not set")
+	}
 }
 
 func (s *Server) Start(ctx context.Context) error {

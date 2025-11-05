@@ -2,14 +2,8 @@ package webdav
 
 import (
 	"fmt"
-	"net/http"
-	"os"
-	"path"
 	"strconv"
 	"strings"
-	"time"
-
-	"github.com/stanNthe5/stringbuf"
 )
 
 var pctHex = "0123456789ABCDEF"
@@ -46,86 +40,6 @@ type entry struct {
 	size    int64
 	isDir   bool
 	modTime string
-}
-
-func filesToXML(urlPath string, fi os.FileInfo, children []os.FileInfo) stringbuf.StringBuf {
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	entries := make([]entry, 0, len(children)+1)
-
-	// Add the current file itself
-	entries = append(entries, entry{
-		escHref: xmlEscape(fastEscapePath(urlPath)),
-		escName: xmlEscape(fi.Name()),
-		isDir:   fi.IsDir(),
-		size:    fi.Size(),
-		modTime: fi.ModTime().Format(time.RFC3339),
-	})
-	for _, info := range children {
-
-		nm := info.Name()
-		// build raw href
-		href := path.Join("/", urlPath, nm)
-		if info.IsDir() {
-			href += "/"
-		}
-
-		entries = append(entries, entry{
-			escHref: xmlEscape(fastEscapePath(href)),
-			escName: xmlEscape(nm),
-			isDir:   info.IsDir(),
-			size:    info.Size(),
-			modTime: info.ModTime().Format(time.RFC3339),
-		})
-	}
-
-	sb := stringbuf.New("")
-
-	// XML header and main element
-	_, _ = sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
-	_, _ = sb.WriteString(`<d:multistatus xmlns:d="DAV:">`)
-
-	// Add responses for each entry
-	for _, e := range entries {
-		_, _ = sb.WriteString(`<d:response>`)
-		_, _ = sb.WriteString(`<d:href>`)
-		_, _ = sb.WriteString(e.escHref)
-		_, _ = sb.WriteString(`</d:href>`)
-		_, _ = sb.WriteString(`<d:propstat>`)
-		_, _ = sb.WriteString(`<d:prop>`)
-
-		if e.isDir {
-			_, _ = sb.WriteString(`<d:resourcetype><d:collection/></d:resourcetype>`)
-		} else {
-			_, _ = sb.WriteString(`<d:resourcetype/>`)
-			_, _ = sb.WriteString(`<d:getcontentlength>`)
-			_, _ = sb.WriteString(strconv.FormatInt(e.size, 10))
-			_, _ = sb.WriteString(`</d:getcontentlength>`)
-		}
-
-		_, _ = sb.WriteString(`<d:getlastmodified>`)
-		_, _ = sb.WriteString(now)
-		_, _ = sb.WriteString(`</d:getlastmodified>`)
-
-		_, _ = sb.WriteString(`<d:displayname>`)
-		_, _ = sb.WriteString(e.escName)
-		_, _ = sb.WriteString(`</d:displayname>`)
-
-		_, _ = sb.WriteString(`</d:prop>`)
-		_, _ = sb.WriteString(`<d:status>HTTP/1.1 200 OK</d:status>`)
-		_, _ = sb.WriteString(`</d:propstat>`)
-		_, _ = sb.WriteString(`</d:response>`)
-	}
-
-	// Close root element
-	_, _ = sb.WriteString(`</d:multistatus>`)
-	return sb
-}
-
-func writeXml(w http.ResponseWriter, status int, buf stringbuf.StringBuf) {
-	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-	w.WriteHeader(status)
-	_, _ = w.Write(buf.Bytes())
 }
 
 func isClientDisconnection(err error) bool {
@@ -203,4 +117,27 @@ func parseRange(s string, size int64) ([]httpRange, error) {
 		ranges = append(ranges, r)
 	}
 	return ranges, nil
+}
+
+// Basic XML escaping function
+func xmlEscape(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case '&':
+			b.WriteString("&amp;")
+		case '<':
+			b.WriteString("&lt;")
+		case '>':
+			b.WriteString("&gt;")
+		case '"':
+			b.WriteString("&quot;")
+		case '\'':
+			b.WriteString("&apos;")
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

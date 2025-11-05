@@ -3,13 +3,14 @@ package main
 import (
 	"context"
 	"flag"
-	"github.com/sirrobot01/decypharr/cmd/decypharr"
-	"github.com/sirrobot01/decypharr/internal/config"
 	"log"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"syscall"
+
+	"github.com/sirrobot01/decypharr/cmd/decypharr"
+	"github.com/sirrobot01/decypharr/internal/config"
 )
 
 func main() {

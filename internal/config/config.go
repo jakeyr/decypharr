@@ -10,15 +10,25 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 )
 
-type RepairStrategy string
+type (
+	RepairStrategy     string
+	WebDavFolderNaming string
+)
 
 const (
 	RepairStrategyPerFile    RepairStrategy = "per_file"
 	RepairStrategyPerTorrent RepairStrategy = "per_torrent"
+
+	WebDavUseFileName          WebDavFolderNaming = "filename"
+	WebDavUseOriginalName      WebDavFolderNaming = "original"
+	WebDavUseFileNameNoExt     WebDavFolderNaming = "filename_no_ext"
+	WebDavUseOriginalNameNoExt WebDavFolderNaming = "original_no_ext"
+	WebdavUseHash              WebDavFolderNaming = "infohash"
 )
 
 var (
@@ -28,35 +38,49 @@ var (
 )
 
 type Debrid struct {
-	Name              string   `json:"name,omitempty"`
-	APIKey            string   `json:"api_key,omitempty"`
-	DownloadAPIKeys   []string `json:"download_api_keys,omitempty"`
-	Folder            string   `json:"folder,omitempty"`
-	RcloneMountPath   string   `json:"rclone_mount_path,omitempty"` // Custom rclone mount path for this debrid service
-	DownloadUncached  bool     `json:"download_uncached,omitempty"`
-	CheckCached       bool     `json:"check_cached,omitempty"`
-	RateLimit         string   `json:"rate_limit,omitempty"` // 200/minute or 10/second
-	RepairRateLimit   string   `json:"repair_rate_limit,omitempty"`
-	DownloadRateLimit string   `json:"download_rate_limit,omitempty"`
-	Proxy             string   `json:"proxy,omitempty"`
-	UnpackRar         bool     `json:"unpack_rar,omitempty"`
-	AddSamples        bool     `json:"add_samples,omitempty"`
-	MinimumFreeSlot   int      `json:"minimum_free_slot,omitempty"` // Minimum active pots to use this debrid
-	Limit             int      `json:"limit,omitempty"`             // Maximum number of total torrents
+	Provider                     string   `json:"provider,omitempty"` // realdebrid, alldebrid, debridlink, torbox
+	Name                         string   `json:"name,omitempty"`
+	APIKey                       string   `json:"api_key,omitempty"`
+	DownloadAPIKeys              []string `json:"download_api_keys,omitempty"`
+	Folder                       string   `json:"folder,omitempty"`
+	RcloneMountPath              string   `json:"rclone_mount_path,omitempty"` // Custom rclone mount path for this debrid service
+	DownloadUncached             bool     `json:"download_uncached,omitempty"`
+	CheckCached                  bool     `json:"check_cached,omitempty"`
+	RateLimit                    string   `json:"rate_limit,omitempty"` // 200/minute or 10/second
+	RepairRateLimit              string   `json:"repair_rate_limit,omitempty"`
+	DownloadRateLimit            string   `json:"download_rate_limit,omitempty"`
+	Proxy                        string   `json:"proxy,omitempty"`
+	UnpackRar                    bool     `json:"unpack_rar,omitempty"`
+	AddSamples                   bool     `json:"add_samples,omitempty"`
+	MinimumFreeSlot              int      `json:"minimum_free_slot,omitempty"` // Minimum active pots to use this debrid
+	Limit                        int      `json:"limit,omitempty"`             // Maximum number of total torrents
+	TorrentsRefreshInterval      string   `json:"torrents_refresh_interval,omitempty"`
+	DownloadLinksRefreshInterval string   `json:"download_links_refresh_interval,omitempty"`
+	Workers                      int      `json:"workers,omitempty"`
+	AutoExpireLinksAfter         string   `json:"auto_expire_links_after,omitempty"`
+	ServeFromRclone              bool     `json:"serve_from_rclone,omitempty"`
 
-	UseWebDav bool `json:"use_webdav,omitempty"`
-	WebDav
+	// Folder
+	FolderNaming string `json:"folder_naming,omitempty"`
+
+	// Rclone
+	RcUrl         string `json:"rc_url,omitempty"`
+	RcUser        string `json:"rc_user,omitempty"`
+	RcPass        string `json:"rc_pass,omitempty"`
+	RcRefreshDirs string `json:"rc_refresh_dirs,omitempty"` // comma separated list of directories to refresh
+
+	// Directories
+	Directories map[string]WebdavDirectories `json:"directories,omitempty"`
 }
 
+// QBitTorrent is deprecated. Use Manager instead.
+// Kept for backward compatibility with existing configs.
 type QBitTorrent struct {
-	Username          	string   `json:"username,omitempty"`
-	Password          	string   `json:"password,omitempty"`
-	Port              	string   `json:"port,omitempty"` // deprecated
-	DownloadFolder    	string   `json:"download_folder,omitempty"`
-	Categories        	[]string `json:"categories,omitempty"`
-	RefreshInterval   	int      `json:"refresh_interval,omitempty"`
-	SkipPreCache      	bool     `json:"skip_pre_cache,omitempty"`
-	MaxDownloads      	int      `json:"max_downloads,omitempty"`
+	DownloadFolder      string   `json:"download_folder,omitempty"`
+	Categories          []string `json:"categories,omitempty"`
+	RefreshInterval     int      `json:"refresh_interval,omitempty"`
+	SkipPreCache        bool     `json:"skip_pre_cache,omitempty"`
+	MaxDownloads        int      `json:"max_downloads,omitempty"`
 	AlwaysRmTrackerUrls bool     `json:"always_rm_tracker_urls,omitempty"`
 }
 
@@ -71,12 +95,49 @@ type Arr struct {
 	Source           string `json:"source,omitempty"` // The source of the arr, e.g. "auto", "config", "". Auto means it was automatically detected from the arr
 }
 
+type CustomFolders struct {
+	Filters map[string]string `json:"filters,omitempty"`
+}
+
+type Manager struct {
+	// Core manager settings
+	FolderNaming    WebDavFolderNaming       `json:"folder_naming,omitempty"`
+	SkipPreCache    bool                     `json:"skip_pre_cache,omitempty"`
+	RefreshInterval string                   `json:"refresh_interval,omitempty"`
+	CustomFolders   map[string]CustomFolders `json:"custom_folders,omitempty"`
+	MaxDownloads    int                      `json:"max_downloads,omitempty"`
+
+	// Download settings (moved from QBitTorrent)
+	DownloadFolder      string   `json:"download_folder,omitempty"`
+	Categories          []string `json:"categories,omitempty"`
+	AlwaysRmTrackerUrls bool     `json:"always_rm_tracker_urls,omitempty"`
+
+	// File filtering (moved from root Config)
+	AllowedExt         []string `json:"allowed_file_types,omitempty"`
+	MinFileSize        string   `json:"min_file_size,omitempty"`        // Minimum file size to download, 10MB, 1GB, etc
+	MaxFileSize        string   `json:"max_file_size,omitempty"`        // Maximum file size to download (0 means no limit)
+	RemoveStalledAfter string   `json:"remove_stalled_after,omitempty"` // Duration before removing stalled torrents
+
+	// Notifications and callbacks (moved from root Config)
+	DiscordWebhook string `json:"discord_webhook_url,omitempty"`
+	CallbackURL    string `json:"callback_url,omitempty"`
+
+	// WebDAV auth (moved from root Config)
+	EnableWebdavAuth bool `json:"enable_webdav_auth,omitempty"`
+
+	// Rclone integration
+	RcUrl        string `json:"rc_url,omitempty"`
+	RcUser       string `json:"rc_user,omitempty"`
+	RcPass       string `json:"rc_pass,omitempty"`
+	RefreshDirs  string `json:"refresh_dirs,omitempty"`
+	Retries      int    `json:"retries,omitempty"`
+	SkipAutoMove bool   `json:"skip_auto_move,omitempty"`
+}
+
 type Repair struct {
 	Enabled     bool           `json:"enabled,omitempty"`
 	Interval    string         `json:"interval,omitempty"`
-	ZurgURL     string         `json:"zurg_url,omitempty"`
 	AutoProcess bool           `json:"auto_process,omitempty"`
-	UseWebDav   bool           `json:"use_webdav,omitempty"`
 	Workers     int            `json:"workers,omitempty"`
 	ReInsert    bool           `json:"reinsert,omitempty"`
 	Strategy    RepairStrategy `json:"strategy,omitempty"`
@@ -176,24 +237,30 @@ type Config struct {
 	URLBase     string `json:"url_base,omitempty"`
 	Port        string `json:"port,omitempty"`
 
-	LogLevel           string      `json:"log_level,omitempty"`
-	Debrids            []Debrid    `json:"debrids,omitempty"`
-	QBitTorrent        QBitTorrent `json:"qbittorrent,omitempty"`
-	Arrs               []Arr       `json:"arrs,omitempty"`
-	Repair             Repair      `json:"repair,omitempty"`
-	WebDav             WebDav      `json:"webdav,omitempty"`
-	Rclone             Rclone      `json:"rclone,omitempty"`
-	Dfs                DFS         `json:"dfs,omitempty"`
-	AllowedExt         []string    `json:"allowed_file_types,omitempty"`
-	MinFileSize        string      `json:"min_file_size,omitempty"` // Minimum file size to download, 10MB, 1GB, etc
-	MaxFileSize        string      `json:"max_file_size,omitempty"` // Maximum file size to download (0 means no limit)
-	Path               string      `json:"-"`                       // Path to save the config file
-	UseAuth            bool        `json:"use_auth,omitempty"`
-	Auth               *Auth       `json:"-"`
-	DiscordWebhook     string      `json:"discord_webhook_url,omitempty"`
-	RemoveStalledAfter string      `json:"remove_stalled_after,omitzero"`
-	CallbackURL        string      `json:"callback_url,omitempty"`
-	EnableWebdavAuth   bool        `json:"enable_webdav_auth,omitempty"`
+	LogLevel    string      `json:"log_level,omitempty"`
+	Debrids     []Debrid    `json:"debrids,omitempty"`
+	QBitTorrent QBitTorrent `json:"qbittorrent,omitempty"` // Deprecated: use Manager instead
+	Arrs        []Arr       `json:"arrs,omitempty"`
+	Repair      Repair      `json:"repair,omitempty"`
+	Rclone      Rclone      `json:"rclone,omitempty"`
+	Dfs         DFS         `json:"dfs,omitempty"`
+	Manager     Manager     `json:"manager,omitempty"`
+
+	// Deprecated: moved to Manager. Kept for backward compatibility
+	AllowedExt         []string `json:"allowed_file_types,omitempty"`
+	MinFileSize        string   `json:"min_file_size,omitempty"`
+	MaxFileSize        string   `json:"max_file_size,omitempty"`
+	DiscordWebhook     string   `json:"discord_webhook_url,omitempty"`
+	RemoveStalledAfter string   `json:"remove_stalled_after,omitzero"`
+	CallbackURL        string   `json:"callback_url,omitempty"`
+	EnableWebdavAuth   bool     `json:"enable_webdav_auth,omitempty"`
+
+	Path           string `json:"-"` // Path to save the config file
+	UseAuth        bool   `json:"use_auth,omitempty"`
+	Username       string `json:"username,omitempty"`        // Username for authentication
+	Password       string `json:"password,omitempty"`        // Hashed password for authentication
+	SetupCompleted bool   `json:"setup_completed,omitempty"` // Tracks if initial setup wizard was completed
+	Auth           *Auth  `json:"-"`
 }
 
 func (c *Config) JsonFile() string {
@@ -213,10 +280,13 @@ func (c *Config) loadConfig() error {
 		return fmt.Errorf("config path not set")
 	}
 	c.Path = configPath
-	file, err := os.ReadFile(c.JsonFile())
+
+	// Read the JSON config file directly
+	configFile := c.JsonFile()
+	data, err := os.ReadFile(configFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Printf("Config file not found, creating a new one at %s\n", c.JsonFile())
+			fmt.Printf("Config file not found, creating a new one at %s\n", configFile)
 			// Create a default config file if it doesn't exist
 			if err := c.createConfig(c.Path); err != nil {
 				return fmt.Errorf("failed to create config file: %w", err)
@@ -226,11 +296,289 @@ func (c *Config) loadConfig() error {
 		return fmt.Errorf("error reading config file: %w", err)
 	}
 
-	if err := json.Unmarshal(file, &c); err != nil {
-		return fmt.Errorf("error unmarshaling config: %w", err)
+	// Parse JSON
+	if err := json.Unmarshal(data, &c); err != nil {
+		return fmt.Errorf("error parsing config JSON: %w", err)
 	}
+
+	// Set defaults for any missing values
 	c.setDefaults()
+
+	// Apply environment variable overrides
+	c.applyEnvOverrides()
+
 	return nil
+}
+
+// applyEnvOverrides applies environment variable overrides with DECYPHARR_ prefix
+// Environment variables use __ (double underscore) for nested fields and array indices
+// Examples:
+//
+//	DECYPHARR_PORT=9090
+//	DECYPHARR_MANAGER__DOWNLOAD_FOLDER=/downloads
+//	DECYPHARR_DEBRIDS__0__NAME=realdebrid
+//	DECYPHARR_DEBRIDS__0__API_KEY=abc123
+func (c *Config) applyEnvOverrides() {
+	// Helper to get env var with prefix
+	getEnv := func(key string) string {
+		return os.Getenv("DECYPHARR_" + key)
+	}
+
+	// Helper to parse boolean values
+	parseBool := func(val string) bool {
+		return val == "true" || val == "1" || val == "yes"
+	}
+
+	// Root level fields
+	if val := getEnv("PORT"); val != "" {
+		c.Port = val
+	}
+	if val := getEnv("BIND_ADDRESS"); val != "" {
+		c.BindAddress = val
+	}
+	if val := getEnv("URL_BASE"); val != "" {
+		c.URLBase = val
+	}
+	if val := getEnv("LOG_LEVEL"); val != "" {
+		c.LogLevel = val
+	}
+	if val := getEnv("USE_AUTH"); val != "" {
+		c.UseAuth = parseBool(val)
+	}
+
+	// Manager settings
+	if val := getEnv("MANAGER__DOWNLOAD_FOLDER"); val != "" {
+		c.Manager.DownloadFolder = val
+	}
+	if val := getEnv("MANAGER__REFRESH_INTERVAL"); val != "" {
+		c.Manager.RefreshInterval = val
+	}
+	if val := getEnv("MANAGER__MAX_DOWNLOADS"); val != "" {
+		if v, err := strconv.Atoi(val); err == nil {
+			c.Manager.MaxDownloads = v
+		}
+	}
+	if val := getEnv("MANAGER__SKIP_PRE_CACHE"); val != "" {
+		c.Manager.SkipPreCache = parseBool(val)
+	}
+	if val := getEnv("MANAGER__ALWAYS_RM_TRACKER_URLS"); val != "" {
+		c.Manager.AlwaysRmTrackerUrls = parseBool(val)
+	}
+	if val := getEnv("MANAGER__MIN_FILE_SIZE"); val != "" {
+		c.Manager.MinFileSize = val
+	}
+	if val := getEnv("MANAGER__MAX_FILE_SIZE"); val != "" {
+		c.Manager.MaxFileSize = val
+	}
+	if val := getEnv("MANAGER__DISCORD_WEBHOOK_URL"); val != "" {
+		c.Manager.DiscordWebhook = val
+	}
+	if val := getEnv("MANAGER__CALLBACK_URL"); val != "" {
+		c.Manager.CallbackURL = val
+	}
+	if val := getEnv("MANAGER__REMOVE_STALLED_AFTER"); val != "" {
+		c.Manager.RemoveStalledAfter = val
+	}
+	if val := getEnv("MANAGER__ENABLE_WEBDAV_AUTH"); val != "" {
+		c.Manager.EnableWebdavAuth = parseBool(val)
+	}
+	if val := getEnv("MANAGER__RETRIES"); val != "" {
+		if v, err := strconv.Atoi(val); err == nil {
+			c.Manager.Retries = v
+		}
+	}
+
+	if val := getEnv("MANAGER__SKIP_AUTO_MOVE"); val != "" {
+		c.Manager.SkipAutoMove = parseBool(val)
+	}
+	// Manager categories array
+	for i := 0; i < 100; i++ { // Support up to 100 categories
+		key := fmt.Sprintf("MANAGER__CATEGORIES__%d", i)
+		if val := getEnv(key); val != "" {
+			if i >= len(c.Manager.Categories) {
+				c.Manager.Categories = append(c.Manager.Categories, make([]string, i-len(c.Manager.Categories)+1)...)
+			}
+			c.Manager.Categories[i] = val
+		} else {
+			break
+		}
+	}
+	// Manager allowed extensions array
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("MANAGER__ALLOWED_FILE_TYPES__%d", i)
+		if val := getEnv(key); val != "" {
+			if i >= len(c.Manager.AllowedExt) {
+				c.Manager.AllowedExt = append(c.Manager.AllowedExt, make([]string, i-len(c.Manager.AllowedExt)+1)...)
+			}
+			c.Manager.AllowedExt[i] = val
+		} else {
+			break
+		}
+	}
+
+	// Repair settings
+	if val := getEnv("REPAIR__ENABLED"); val != "" {
+		c.Repair.Enabled = parseBool(val)
+	}
+	if val := getEnv("REPAIR__INTERVAL"); val != "" {
+		c.Repair.Interval = val
+	}
+	if val := getEnv("REPAIR__WORKERS"); val != "" {
+		if v, err := strconv.Atoi(val); err == nil {
+			c.Repair.Workers = v
+		}
+	}
+	if val := getEnv("REPAIR__STRATEGY"); val != "" {
+		c.Repair.Strategy = RepairStrategy(val)
+	}
+	if val := getEnv("REPAIR__AUTO_PROCESS"); val != "" {
+		c.Repair.AutoProcess = parseBool(val)
+	}
+
+	// DFS settings
+	if val := getEnv("DFS__ENABLED"); val != "" {
+		c.Dfs.Enabled = parseBool(val)
+	}
+	if val := getEnv("DFS__MOUNT_PATH"); val != "" {
+		c.Dfs.MountPath = val
+	}
+	if val := getEnv("DFS__CACHE_DIR"); val != "" {
+		c.Dfs.CacheDir = val
+	}
+	if val := getEnv("DFS__CHUNK_SIZE"); val != "" {
+		c.Dfs.ChunkSize = val
+	}
+	if val := getEnv("DFS__READ_AHEAD_SIZE"); val != "" {
+		c.Dfs.ReadAheadSize = val
+	}
+	if val := getEnv("DFS__MAX_CONCURRENT_READS"); val != "" {
+		if v, err := strconv.Atoi(val); err == nil {
+			c.Dfs.MaxConcurrentReads = v
+		}
+	}
+	if val := getEnv("DFS__CACHE_EXPIRY"); val != "" {
+		c.Dfs.CacheExpiry = val
+	}
+	if val := getEnv("DFS__DISK_CACHE_SIZE"); val != "" {
+		c.Dfs.DiskCacheSize = val
+	}
+	if val := getEnv("DFS__CACHE_CLEANUP_INTERVAL"); val != "" {
+		c.Dfs.CacheCleanupInterval = val
+	}
+	if val := getEnv("DFS__BUFFER_SIZE"); val != "" {
+		c.Dfs.BufferSize = val
+	}
+	if val := getEnv("DFS__DAEMON_TIMEOUT"); val != "" {
+		c.Dfs.DaemonTimeout = val
+	}
+	if val := getEnv("DFS__UID"); val != "" {
+		if v, err := strconv.ParseUint(val, 10, 32); err == nil {
+			c.Dfs.UID = uint32(v)
+		}
+	}
+	if val := getEnv("DFS__GID"); val != "" {
+		if v, err := strconv.ParseUint(val, 10, 32); err == nil {
+			c.Dfs.GID = uint32(v)
+		}
+	}
+	if val := getEnv("DFS__UMASK"); val != "" {
+		c.Dfs.Umask = val
+	}
+	if val := getEnv("DFS__ALLOW_OTHER"); val != "" {
+		c.Dfs.AllowOther = parseBool(val)
+	}
+	if val := getEnv("DFS__ALLOW_ROOT"); val != "" {
+		c.Dfs.AllowRoot = parseBool(val)
+	}
+	if val := getEnv("DFS__DEFAULT_PERMISSIONS"); val != "" {
+		c.Dfs.DefaultPermissions = parseBool(val)
+	}
+	if val := getEnv("DFS__ASYNC_READ"); val != "" {
+		c.Dfs.AsyncRead = parseBool(val)
+	}
+	if val := getEnv("DFS__ATTR_TIMEOUT"); val != "" {
+		c.Dfs.AttrTimeout = val
+	}
+	if val := getEnv("DFS__ENTRY_TIMEOUT"); val != "" {
+		c.Dfs.EntryTimeout = val
+	}
+	if val := getEnv("DFS__NEGATIVE_TIMEOUT"); val != "" {
+		c.Dfs.NegativeTimeout = val
+	}
+
+	// Rclone settings
+	if val := getEnv("RCLONE__ENABLED"); val != "" {
+		c.Rclone.Enabled = parseBool(val)
+	}
+	if val := getEnv("RCLONE__MOUNT_PATH"); val != "" {
+		c.Rclone.MountPath = val
+	}
+	if val := getEnv("RCLONE__RC_PORT"); val != "" {
+		c.Rclone.RcPort = val
+	}
+	if val := getEnv("RCLONE__LOG_LEVEL"); val != "" {
+		c.Rclone.LogLevel = val
+	}
+	if val := getEnv("RCLONE__VFS_CACHE_MODE"); val != "" {
+		c.Rclone.VfsCacheMode = val
+	}
+	if val := getEnv("RCLONE__CACHE_DIR"); val != "" {
+		c.Rclone.CacheDir = val
+	}
+	if val := getEnv("RCLONE__TRANSFERS"); val != "" {
+		if v, err := strconv.Atoi(val); err == nil {
+			c.Rclone.Transfers = v
+		}
+	}
+
+	// Debrid providers array
+	for i := 0; i < 10; i++ { // Support up to 10 debrid providers
+		prefix := fmt.Sprintf("DEBRIDS__%d__", i)
+		if val := getEnv(prefix + "NAME"); val != "" {
+			// Ensure array is large enough
+			if i >= len(c.Debrids) {
+				c.Debrids = append(c.Debrids, make([]Debrid, i-len(c.Debrids)+1)...)
+			}
+			c.Debrids[i].Name = val
+
+			// Set other debrid fields
+			if apiKey := getEnv(prefix + "API_KEY"); apiKey != "" {
+				c.Debrids[i].APIKey = apiKey
+			}
+			if folder := getEnv(prefix + "FOLDER"); folder != "" {
+				c.Debrids[i].Folder = folder
+			}
+			if provider := getEnv(prefix + "PROVIDER"); provider != "" {
+				c.Debrids[i].Provider = provider
+			}
+			if proxy := getEnv(prefix + "PROXY"); proxy != "" {
+				c.Debrids[i].Proxy = proxy
+			}
+		}
+	}
+
+	// Arr applications array
+	for i := 0; i < 20; i++ { // Support up to 20 arr applications
+		prefix := fmt.Sprintf("ARRS__%d__", i)
+		if val := getEnv(prefix + "NAME"); val != "" {
+			// Ensure array is large enough
+			if i >= len(c.Arrs) {
+				c.Arrs = append(c.Arrs, make([]Arr, i-len(c.Arrs)+1)...)
+			}
+			c.Arrs[i].Name = val
+
+			// Set other arr fields
+			if host := getEnv(prefix + "HOST"); host != "" {
+				c.Arrs[i].Host = host
+			}
+			if token := getEnv(prefix + "TOKEN"); token != "" {
+				c.Arrs[i].Token = token
+			}
+			if cleanup := getEnv(prefix + "CLEANUP"); cleanup != "" {
+				c.Arrs[i].Cleanup = parseBool(cleanup)
+			}
+		}
+	}
 }
 
 func validateDebrids(debrids []Debrid) error {
@@ -391,6 +739,10 @@ func (c *Config) updateDebrid(d Debrid) Debrid {
 	workers := runtime.NumCPU() * 50
 	perDebrid := workers / len(c.Debrids)
 
+	if d.Provider == "" {
+		d.Provider = d.Name
+	}
+
 	var downloadKeys []string
 
 	if len(d.DownloadAPIKeys) > 0 {
@@ -401,56 +753,147 @@ func (c *Config) updateDebrid(d Debrid) Debrid {
 	}
 	d.DownloadAPIKeys = downloadKeys
 
-	if !d.UseWebDav {
-		return d
-	}
-
 	if d.TorrentsRefreshInterval == "" {
-		d.TorrentsRefreshInterval = cmp.Or(c.WebDav.TorrentsRefreshInterval, "45s") // 45 seconds
+		d.TorrentsRefreshInterval = "45s" // 45 seconds
 	}
-	if d.WebDav.DownloadLinksRefreshInterval == "" {
-		d.DownloadLinksRefreshInterval = cmp.Or(c.WebDav.DownloadLinksRefreshInterval, "40m") // 40 minutes
+	if d.DownloadLinksRefreshInterval == "" {
+		d.DownloadLinksRefreshInterval = "40m" // 40 minutes
 	}
 	if d.Workers == 0 {
 		d.Workers = perDebrid
 	}
 	if d.FolderNaming == "" {
-		d.FolderNaming = cmp.Or(c.WebDav.FolderNaming, "original_no_ext")
+		d.FolderNaming = "original_no_ext"
 	}
 	if d.AutoExpireLinksAfter == "" {
-		d.AutoExpireLinksAfter = cmp.Or(c.WebDav.AutoExpireLinksAfter, "3d") // 2 days
+		d.AutoExpireLinksAfter = "2d" // 2 days
 	}
-
-	// Merge debrid specified directories with global directories
-
-	directories := c.WebDav.Directories
-	if directories == nil {
-		directories = make(map[string]WebdavDirectories)
-	}
-
-	for name, dir := range d.Directories {
-		directories[name] = dir
-	}
-	d.Directories = directories
-
-	d.RcUrl = cmp.Or(d.RcUrl, c.WebDav.RcUrl)
-	d.RcUser = cmp.Or(d.RcUser, c.WebDav.RcUser)
-	d.RcPass = cmp.Or(d.RcPass, c.WebDav.RcPass)
 
 	return d
 }
 
+// migrateQBitTorrentToManager migrates deprecated QBitTorrent config to Manager
+// This ensures backward compatibility with existing configs
+func (c *Config) migrateQBitTorrentToManager() {
+	// If Manager fields are not set but QBitTorrent fields are, migrate them
+	if c.Manager.DownloadFolder == "" && c.QBitTorrent.DownloadFolder != "" {
+		c.Manager.DownloadFolder = c.QBitTorrent.DownloadFolder
+	}
+
+	if len(c.Manager.Categories) == 0 && len(c.QBitTorrent.Categories) > 0 {
+		c.Manager.Categories = c.QBitTorrent.Categories
+	}
+
+	if c.Manager.RefreshInterval == "" && c.QBitTorrent.RefreshInterval > 0 {
+		c.Manager.RefreshInterval = fmt.Sprintf("%ds", c.QBitTorrent.RefreshInterval)
+	}
+
+	if !c.Manager.SkipPreCache && c.QBitTorrent.SkipPreCache {
+		c.Manager.SkipPreCache = c.QBitTorrent.SkipPreCache
+	}
+
+	if c.Manager.MaxDownloads == 0 && c.QBitTorrent.MaxDownloads > 0 {
+		c.Manager.MaxDownloads = c.QBitTorrent.MaxDownloads
+	}
+
+	if !c.Manager.AlwaysRmTrackerUrls && c.QBitTorrent.AlwaysRmTrackerUrls {
+		c.Manager.AlwaysRmTrackerUrls = c.QBitTorrent.AlwaysRmTrackerUrls
+	}
+
+	// Set default download folder if not set
+	if c.Manager.DownloadFolder == "" {
+		c.Manager.DownloadFolder = filepath.Join(c.Path, "downloads")
+	}
+
+	// Set default categories if not set
+	if len(c.Manager.Categories) == 0 {
+		c.Manager.Categories = []string{"sonarr", "radarr"}
+	}
+
+	// Set default refresh interval if not set
+	if c.Manager.RefreshInterval == "" {
+		c.Manager.RefreshInterval = "30s"
+	}
+}
+
+// migrateRootFieldsToManager migrates deprecated root-level fields to Manager
+func (c *Config) migrateRootFieldsToManager() {
+	// Migrate AllowedExt
+	if len(c.Manager.AllowedExt) == 0 && len(c.AllowedExt) > 0 {
+		c.Manager.AllowedExt = c.AllowedExt
+	}
+
+	// Migrate MinFileSize
+	if c.Manager.MinFileSize == "" && c.MinFileSize != "" {
+		c.Manager.MinFileSize = c.MinFileSize
+	}
+
+	// Migrate MaxFileSize
+	if c.Manager.MaxFileSize == "" && c.MaxFileSize != "" {
+		c.Manager.MaxFileSize = c.MaxFileSize
+	}
+
+	// Migrate DiscordWebhook
+	if c.Manager.DiscordWebhook == "" && c.DiscordWebhook != "" {
+		c.Manager.DiscordWebhook = c.DiscordWebhook
+	}
+
+	// Migrate RemoveStalledAfter
+	if c.Manager.RemoveStalledAfter == "" && c.RemoveStalledAfter != "" {
+		c.Manager.RemoveStalledAfter = c.RemoveStalledAfter
+	}
+
+	// Migrate CallbackURL
+	if c.Manager.CallbackURL == "" && c.CallbackURL != "" {
+		c.Manager.CallbackURL = c.CallbackURL
+	}
+
+	// Migrate EnableWebdavAuth
+	if !c.Manager.EnableWebdavAuth && c.EnableWebdavAuth {
+		c.Manager.EnableWebdavAuth = c.EnableWebdavAuth
+	}
+}
+
 func (c *Config) setDefaults() {
+	// Migrate deprecated fields to Manager (backward compatibility)
+	c.migrateQBitTorrentToManager()
+	c.migrateRootFieldsToManager()
+
 	for i, debrid := range c.Debrids {
 		c.Debrids[i] = c.updateDebrid(debrid)
 	}
 
-	if len(c.AllowedExt) == 0 {
-		c.AllowedExt = getDefaultExtensions()
+	firstDebrid := Debrid{}
+	if len(c.Debrids) > 0 {
+		firstDebrid = c.Debrids[0]
 	}
 
-	c.Port = cmp.Or(c.Port, c.QBitTorrent.Port)
+	// Move WebDav global settings to Manager if not set
+	if c.Manager.RcUrl == "" {
+		c.Manager.RcUrl = firstDebrid.RcUrl
+	}
+	if c.Manager.RcUser == "" {
+		c.Manager.RcUser = firstDebrid.RcUser
+	}
+	if c.Manager.RcPass == "" {
+		c.Manager.RcPass = firstDebrid.RcPass
+	}
 
+	if c.Manager.FolderNaming == "" {
+		c.Manager.FolderNaming = WebDavFolderNaming(firstDebrid.FolderNaming)
+	}
+
+	// Set default allowed extensions if not set in Manager
+	if len(c.Manager.AllowedExt) == 0 {
+		c.Manager.AllowedExt = getDefaultExtensions()
+	}
+
+	// Set default error threshold for multi-debrid switching
+	if c.Manager.Retries == 0 {
+		c.Manager.Retries = 3 // Default to 3 consecutive errors before switching
+	}
+
+	// Basic defaults
 	if c.URLBase == "" {
 		c.URLBase = "/"
 	}
@@ -462,9 +905,23 @@ func (c *Config) setDefaults() {
 		c.URLBase += "/"
 	}
 
+	if c.Port == "" {
+		c.Port = "8282"
+	}
+
+	if c.LogLevel == "" {
+		c.LogLevel = "info"
+	}
+
 	// Set repair defaults
 	if c.Repair.Strategy == "" {
 		c.Repair.Strategy = RepairStrategyPerTorrent
+	}
+	if c.Repair.Interval == "" {
+		c.Repair.Interval = "1h"
+	}
+	if c.Repair.Workers == 0 {
+		c.Repair.Workers = 5
 	}
 
 	// Rclone defaults
@@ -495,6 +952,28 @@ func (c *Config) setDefaults() {
 		c.Rclone.DirCacheTime = cmp.Or(c.Rclone.DirCacheTime, "5m")
 		c.Rclone.LogLevel = cmp.Or(c.Rclone.LogLevel, "INFO")
 	}
+
+	// DFS defaults
+	if c.Dfs.Enabled {
+		if c.Dfs.MountPath == "" {
+			c.Dfs.MountPath = filepath.Join(c.Path, "mount")
+		}
+		if c.Dfs.CacheDir == "" {
+			c.Dfs.CacheDir = filepath.Join(c.Path, "fs", "cache")
+		}
+		if c.Dfs.ChunkSize == "" {
+			c.Dfs.ChunkSize = "8MB"
+		}
+		if c.Dfs.ReadAheadSize == "" {
+			c.Dfs.ReadAheadSize = "16MB"
+		}
+		if c.Dfs.MaxConcurrentReads == 0 {
+			c.Dfs.MaxConcurrentReads = 4
+		}
+		if c.Dfs.CacheExpiry == "" {
+			c.Dfs.CacheExpiry = "24h"
+		}
+	}
 	// Load the auth file
 	c.Auth = c.GetAuth()
 
@@ -512,13 +991,9 @@ func (c *Config) setDefaults() {
 		}
 	}
 
-	if c.Dfs.Enabled {
-		if c.Dfs.MountPath == "" {
-			c.Dfs.MountPath = filepath.Join(c.Path, "mount")
-		}
-		if c.Dfs.CacheDir == "" {
-			c.Dfs.CacheDir = filepath.Join(c.Path, "fs", "cache")
-		}
+	// Set folder naming from first debrid if available
+	if len(c.Debrids) > 0 && c.Manager.FolderNaming == "" {
+		c.Manager.FolderNaming = WebDavFolderNaming(c.Debrids[0].FolderNaming)
 	}
 }
 

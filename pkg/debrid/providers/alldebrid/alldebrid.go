@@ -21,20 +21,14 @@ import (
 )
 
 type AllDebrid struct {
-	name                  string
 	Host                  string `json:"host"`
 	APIKey                string
 	accountsManager       *account.Manager
 	autoExpiresLinksAfter time.Duration
-	DownloadUncached      bool
 	client                *request.Client
 	Profile               *types.Profile `json:"profile"`
-
-	MountPath       string
-	logger          zerolog.Logger
-	checkCached     bool
-	addSamples      bool
-	minimumFreeSlot int
+	logger                zerolog.Logger
+	config                config.Debrid
 }
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*AllDebrid, error) {
@@ -55,23 +49,18 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*AllDebrid,
 		autoExpiresLinksAfter = 48 * time.Hour
 	}
 	return &AllDebrid{
-		name:                  "alldebrid",
 		Host:                  "http://api.alldebrid.com/v4.1",
 		APIKey:                dc.APIKey,
 		accountsManager:       account.NewManager(dc, ratelimits["download"], _log),
-		DownloadUncached:      dc.DownloadUncached,
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
 		client:                client,
-		MountPath:             dc.Folder,
 		logger:                logger.New(dc.Name),
-		checkCached:           dc.CheckCached,
-		addSamples:            dc.AddSamples,
-		minimumFreeSlot:       dc.MinimumFreeSlot,
+		config:                dc,
 	}, nil
 }
 
-func (ad *AllDebrid) Name() string {
-	return ad.name
+func (ad *AllDebrid) Config() config.Debrid {
+	return ad.config
 }
 
 func (ad *AllDebrid) Logger() zerolog.Logger {
@@ -114,12 +103,12 @@ func (ad *AllDebrid) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error
 	return torrent, nil
 }
 
-func getAlldebridStatus(statusCode int) string {
+func getAlldebridStatus(statusCode int) types.TorrentStatus {
 	switch {
 	case statusCode == 4:
-		return "downloaded"
+		return types.TorrentStatusCompleted
 	case statusCode >= 0 && statusCode <= 3:
-		return "downloading"
+		return types.TorrentStatusDownloading
 	default:
 		return "error"
 	}
@@ -152,7 +141,7 @@ func (ad *AllDebrid) flattenFiles(torrentId string, files []MagnetFile, parentPa
 			fileName := filepath.Base(f.Name)
 
 			// Skip sample files
-			if !ad.addSamples && utils.IsSampleFile(f.Name) {
+			if !ad.config.AddSamples && utils.IsSampleFile(f.Name) {
 				continue
 			}
 			if !cfg.IsAllowedFile(fileName) {
@@ -202,8 +191,7 @@ func (ad *AllDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 		OriginalFilename: name,
 		Files:            make(map[string]types.File),
 		InfoHash:         data.Hash,
-		Debrid:           ad.name,
-		MountPath:        ad.MountPath,
+		Debrid:           ad.config.Name,
 		Added:            time.Unix(data.CompletionDate, 0).Format(time.RFC3339),
 	}
 	t.Bytes = data.Size
@@ -240,8 +228,7 @@ func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
 	t.Filename = name
 	t.OriginalFilename = name
 	t.Folder = name
-	t.MountPath = ad.MountPath
-	t.Debrid = ad.name
+	t.Debrid = ad.config.Name
 	t.Bytes = data.Size
 	t.Seeders = data.Seeders
 	t.Added = time.Unix(data.CompletionDate, 0).Format(time.RFC3339)
@@ -264,11 +251,10 @@ func (ad *AllDebrid) CheckStatus(torrent *types.Torrent) (*types.Torrent, error)
 		if err != nil || torrent == nil {
 			return torrent, err
 		}
-		status := torrent.Status
-		if status == "downloaded" {
+		if torrent.Status == types.TorrentStatusCompleted {
 			ad.logger.Info().Msgf("Torrent: %s downloaded", torrent.Name)
 			return torrent, nil
-		} else if utils.Contains(ad.GetDownloadingStatus(), status) {
+		} else if utils.Contains(ad.GetDownloadingStatus(), string(torrent.Status)) {
 			if !torrent.DownloadUncached {
 				return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
 			}
@@ -405,8 +391,7 @@ func (ad *AllDebrid) GetTorrents() ([]*types.Torrent, error) {
 			OriginalFilename: magnet.Filename,
 			Files:            make(map[string]types.File),
 			InfoHash:         magnet.Hash,
-			Debrid:           ad.name,
-			MountPath:        ad.MountPath,
+			Debrid:           ad.config.Name,
 			Added:            time.Unix(magnet.CompletionDate, 0).Format(time.RFC3339),
 		})
 	}
@@ -422,16 +407,8 @@ func (ad *AllDebrid) GetDownloadingStatus() []string {
 	return []string{"downloading"}
 }
 
-func (ad *AllDebrid) GetDownloadUncached() bool {
-	return ad.DownloadUncached
-}
-
 func (ad *AllDebrid) CheckLink(link string) error {
 	return nil
-}
-
-func (ad *AllDebrid) GetMountPath() string {
-	return ad.MountPath
 }
 
 func (ad *AllDebrid) GetAvailableSlots() (int, error) {
@@ -469,7 +446,7 @@ func (ad *AllDebrid) GetProfile() (*types.Profile, error) {
 	expiration := time.Unix(userData.PremiumUntil, 0)
 	profile := &types.Profile{
 		Id:         1,
-		Name:       ad.name,
+		Name:       ad.config.Name,
 		Username:   userData.Username,
 		Email:      userData.Email,
 		Points:     userData.FidelityPoints,

@@ -13,51 +13,46 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/pkg/debrid/store"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
+	"github.com/sirrobot01/decypharr/pkg/manager"
+	fuseconfig "github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs"
 )
 
 // Mount implements a FUSE filesystem with sparse file caching
 type Mount struct {
 	fs.Inode
-	debrid      *store.Cache
 	vfs         *vfs.Manager
-	config      *config.FuseConfig
+	config      *fuseconfig.FuseConfig
 	logger      zerolog.Logger
 	rootDir     *Dir
 	unmountFunc func()
-	manager     *Manager
+	manager     *manager.Manager
 	name        string
 }
 
 // NewMount creates a new FUSE filesystem
-func NewMount(debridCache *store.Cache) (*Mount, error) {
-	_logger := logger.New("dfs").Sample(zerolog.LevelSampler{
-		TraceSampler: &zerolog.BurstSampler{
-			Burst:       1,
-			Period:      5 * time.Second,
-			NextSampler: &zerolog.BasicSampler{N: 100},
-		},
-	})
-	debridConfig := debridCache.GetConfig()
-	fuseConfig, err := config.ParseFuseConfig(debridConfig)
+func NewMount(mountInfo manager.FileInfo, mgr *manager.Manager) (*Mount, error) {
+	fuseConfig, err := fuseconfig.ParseFuseConfig(mountInfo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse FUSE config: %w", err)
 	}
 
-	// Create read manager
-	cacheManager := vfs.NewManager(debridCache, fuseConfig)
+	// Create read mgr
+	cacheManager := vfs.NewManager(mgr, fuseConfig)
 
 	mount := &Mount{
-		debrid: debridCache,
-		vfs:    cacheManager,
-		config: fuseConfig,
-		logger: _logger,
-		name:   debridCache.GetConfig().Name,
+		vfs:     cacheManager,
+		config:  fuseConfig,
+		logger:  logger.New("dfs").With().Str("mount", mountInfo.Name()).Logger(),
+		manager: mgr,
+		name:    mountInfo.Name(),
 	}
 	now := time.Now()
-	mount.rootDir = NewDir(cacheManager, debridCache, "", LevelRoot, uint64(now.Unix()), mount.config, mount.logger)
+	mount.rootDir = NewDir(cacheManager, mgr, "", LevelRoot, uint64(now.Unix()), mount.config, mount.logger)
+
+	// Inject event into the mount
+	mgr.SetEventHandlers(manager.NewEventHandlers(mount))
+
 	return mount, nil
 }
 
@@ -78,9 +73,9 @@ func (m *Mount) Start(ctx context.Context) error {
 
 	mountOpt := fuse.MountOptions{
 		AllowOther:           m.config.AllowOther,
-		FsName:               fmt.Sprintf("dfs-%s", m.debrid.GetConfig().Name),
+		FsName:               fmt.Sprintf("dfs-%s", m.name),
 		Debug:                false,
-		Name:                 fmt.Sprintf("dfs-%s", m.debrid.GetConfig().Name),
+		Name:                 fmt.Sprintf("dfs-%s", m.name),
 		DisableXAttrs:        true,
 		IgnoreSecurityLabels: true,
 	}
@@ -94,7 +89,7 @@ func (m *Mount) Start(ctx context.Context) error {
 	}
 
 	if runtime.GOOS == "darwin" {
-		opt = append(opt, fmt.Sprintf("volname=dfs-%s", m.debrid.GetConfig().Name))
+		opt = append(opt, fmt.Sprintf("volname=dfs-%s", m.name))
 		opt = append(opt, "noapplexattr")
 		opt = append(opt, "noappledouble")
 	}
@@ -181,31 +176,15 @@ func (m *Mount) Start(ctx context.Context) error {
 	}
 
 	m.unmountFunc = umount
-
-	// Register with global manager for stats tracking
-	if mgr := GetGlobalManager(); mgr != nil {
-		mgr.RegisterMount(m.name, m)
-		m.manager = mgr
-	}
-
 	m.logger.Info().
 		Str("mount_path", m.config.MountPath).
 		Msg("FUSE filesystem mounted successfully")
 	return nil
 }
 
-func (m *Mount) Type() string {
-	return "dfs"
-}
-
 // Stop stops the  FUSE filesystem
-func (m *Mount) Stop(ctx context.Context) error {
+func (m *Mount) Stop() error {
 	m.logger.Info().Msg("Stopping  FUSE filesystem")
-
-	// Unregister from global manager
-	if m.manager != nil {
-		m.manager.UnregisterMount(m.name)
-	}
 
 	// Unmount first
 	if m.unmountFunc != nil {
@@ -221,6 +200,25 @@ func (m *Mount) Stop(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (m *Mount) Stats() map[string]interface{} {
+	var mountStats map[string]interface{}
+	if m.vfs != nil {
+		vfsStats := m.vfs.GetStats()
+		mountStats = map[string]interface{}{
+			"name":       m.name,
+			"type":       m.Type(),
+			"mounted":    true,
+			"mount_path": m.config.MountPath,
+			"stats":      vfsStats,
+		}
+	}
+	return mountStats
+}
+
+func (m *Mount) Type() string {
+	return "dfs"
 }
 
 // Getattr returns root directory attributes

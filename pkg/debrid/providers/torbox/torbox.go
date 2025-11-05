@@ -28,20 +28,14 @@ import (
 )
 
 type Torbox struct {
-	name                  string
 	Host                  string `json:"host"`
 	APIKey                string
 	accountsManager       *account.Manager
 	autoExpiresLinksAfter time.Duration
-
-	DownloadUncached bool
-	client           *request.Client
-
-	MountPath   string
-	logger      zerolog.Logger
-	checkCached bool
-	addSamples  bool
-	Profile     *types.Profile
+	client                *request.Client
+	logger                zerolog.Logger
+	Profile               *types.Profile
+	config                config.Debrid
 }
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, error) {
@@ -63,22 +57,18 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 	}
 
 	return &Torbox{
-		name:                  "torbox",
 		Host:                  "https://api.torbox.app/v1",
 		APIKey:                dc.APIKey,
 		accountsManager:       account.NewManager(dc, ratelimits["download"], _log),
-		DownloadUncached:      dc.DownloadUncached,
+		config:                dc,
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
 		client:                client,
-		MountPath:             dc.Folder,
 		logger:                _log,
-		checkCached:           dc.CheckCached,
-		addSamples:            dc.AddSamples,
 	}, nil
 }
 
-func (tb *Torbox) Name() string {
-	return tb.name
+func (tb *Torbox) Config() config.Debrid {
+	return tb.config
 }
 
 func (tb *Torbox) Logger() zerolog.Logger {
@@ -163,16 +153,15 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	dt := *data.Data
 	torrentId := strconv.Itoa(dt.Id)
 	torrent.Id = torrentId
-	torrent.MountPath = tb.MountPath
-	torrent.Debrid = tb.name
+	torrent.Debrid = tb.config.Name
 	torrent.Added = time.Now().Format(time.RFC3339)
 
 	return torrent, nil
 }
 
-func (tb *Torbox) getTorboxStatus(status string, finished bool) string {
+func (tb *Torbox) getTorboxStatus(status string, finished bool) types.TorrentStatus {
 	if finished {
-		return "downloaded"
+		return types.TorrentStatusCompleted
 	}
 	downloading := []string{"paused", "downloading",
 		"checkingResumeData", "metaDL", "pausedUP", "queuedUP", "checkingUP",
@@ -187,11 +176,11 @@ func (tb *Torbox) getTorboxStatus(status string, finished bool) string {
 
 	switch {
 	case utils.Contains(downloading, status):
-		return "downloading"
+		return types.TorrentStatusDownloading
 	case utils.Contains(downloaded, status):
-		return "downloaded"
+		return types.TorrentStatusCompleted
 	default:
-		return "error"
+		return types.TorrentStatusError
 	}
 }
 
@@ -222,8 +211,7 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 		Seeders:          data.Seeds,
 		Filename:         data.Name,
 		OriginalFilename: data.Name,
-		MountPath:        tb.MountPath,
-		Debrid:           tb.name,
+		Debrid:           tb.config.Name,
 		Files:            make(map[string]types.File),
 		Added:            data.CreatedAt.Format(time.RFC3339),
 	}
@@ -240,7 +228,7 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 		totalFiles++
 		fileName := filepath.Base(f.Name)
 
-		if !tb.addSamples && utils.IsSampleFile(f.AbsolutePath) {
+		if !tb.config.AddSamples && utils.IsSampleFile(f.AbsolutePath) {
 			skippedSamples++
 			continue
 		}
@@ -279,7 +267,7 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 	}
 
 	t.OriginalFilename = strings.Split(cleanPath, "/")[0]
-	t.Debrid = tb.name
+	t.Debrid = tb.config.Name
 
 	return t, nil
 }
@@ -308,8 +296,7 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 	t.Seeders = data.Seeds
 	t.Filename = name
 	t.OriginalFilename = name
-	t.MountPath = tb.MountPath
-	t.Debrid = tb.name
+	t.Debrid = tb.config.Name
 
 	// Clear existing files map to rebuild it
 	t.Files = make(map[string]types.File)
@@ -321,7 +308,7 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 	for _, f := range data.Files {
 		fileName := filepath.Base(f.Name)
 
-		if !tb.addSamples && utils.IsSampleFile(f.AbsolutePath) {
+		if !tb.config.AddSamples && utils.IsSampleFile(f.AbsolutePath) {
 			continue
 		}
 
@@ -359,7 +346,7 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 	}
 
 	t.OriginalFilename = strings.Split(cleanPath, "/")[0]
-	t.Debrid = tb.name
+	t.Debrid = tb.config.Name
 	return nil
 }
 
@@ -370,11 +357,10 @@ func (tb *Torbox) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
 		if err != nil || torrent == nil {
 			return torrent, err
 		}
-		status := torrent.Status
-		if status == "downloaded" {
+		if torrent.Status == types.TorrentStatusCompleted {
 			tb.logger.Info().Msgf("Torrent: %s downloaded", torrent.Name)
 			return torrent, nil
-		} else if utils.Contains(tb.GetDownloadingStatus(), status) {
+		} else if utils.Contains(tb.GetDownloadingStatus(), string(torrent.Status)) {
 			if !torrent.DownloadUncached {
 				return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
 			}
@@ -550,8 +536,7 @@ func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 			Seeders:          data.Seeds,
 			Filename:         data.Name,
 			OriginalFilename: data.Name,
-			MountPath:        tb.MountPath,
-			Debrid:           tb.name,
+			Debrid:           tb.config.Name,
 			Files:            make(map[string]types.File),
 			Added:            data.CreatedAt.Format(time.RFC3339),
 			InfoHash:         data.Hash,
@@ -560,7 +545,7 @@ func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 		// Process files
 		for _, f := range data.Files {
 			fileName := filepath.Base(f.Name)
-			if !tb.addSamples && utils.IsSampleFile(f.AbsolutePath) {
+			if !tb.config.AddSamples && utils.IsSampleFile(f.AbsolutePath) {
 				// Skip sample files
 				continue
 			}
@@ -601,20 +586,12 @@ func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 	return torrents, nil
 }
 
-func (tb *Torbox) GetDownloadUncached() bool {
-	return tb.DownloadUncached
-}
-
 func (tb *Torbox) RefreshDownloadLinks() error {
 	return nil
 }
 
 func (tb *Torbox) CheckLink(link string) error {
 	return nil
-}
-
-func (tb *Torbox) GetMountPath() string {
-	return tb.MountPath
 }
 
 func (tb *Torbox) GetAvailableSlots() (int, error) {
@@ -675,7 +652,7 @@ func (tb *Torbox) GetProfile() (*types.Profile, error) {
 
 	expiration := time.Unix(userData.PremiumExpiresAt, 0)
 	profile := &types.Profile{
-		Name:       tb.name,
+		Name:       tb.config.Name,
 		Id:         userData.Id,
 		Username:   userData.Email,
 		Email:      userData.Email,

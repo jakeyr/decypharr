@@ -27,27 +27,18 @@ import (
 )
 
 type RealDebrid struct {
-	name string
 	Host string `json:"host"`
 
-	APIKey          string
-	accountsManager *account.Manager
-
-	DownloadUncached      bool
+	APIKey                string
+	accountsManager       *account.Manager
 	client                *request.Client
 	repairClient          *request.Client
 	autoExpiresLinksAfter time.Duration
+	logger                zerolog.Logger
 
-	MountPath string
-	logger    zerolog.Logger
-	UnpackRar bool
-
-	rarSemaphore    chan struct{}
-	checkCached     bool
-	addSamples      bool
-	Profile         *types.Profile
-	minimumFreeSlot int // Minimum number of active pots to maintain (used for cached stuffs, etc.)
-	limit           int
+	rarSemaphore chan struct{}
+	Profile      *types.Profile
+	config       config.Debrid
 }
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*RealDebrid, error) {
@@ -63,13 +54,10 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*RealDebrid
 	}
 
 	r := &RealDebrid{
-		name:                  "realdebrid",
 		Host:                  "https://api.real-debrid.com/rest/1.0",
 		APIKey:                dc.APIKey,
 		accountsManager:       account.NewManager(dc, ratelimits["download"], _log),
-		DownloadUncached:      dc.DownloadUncached,
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
-		UnpackRar:             dc.UnpackRar,
 		client: request.New(
 			request.WithHeaders(headers),
 			request.WithRateLimiter(ratelimits["main"]),
@@ -86,24 +74,15 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*RealDebrid
 			request.WithRetryableStatus(429, 502),
 			request.WithProxy(dc.Proxy),
 		),
-		MountPath:       dc.Folder,
-		logger:          logger.New(dc.Name),
-		rarSemaphore:    make(chan struct{}, 2),
-		checkCached:     dc.CheckCached,
-		addSamples:      dc.AddSamples,
-		minimumFreeSlot: dc.MinimumFreeSlot,
-		limit:           dc.Limit,
+		logger:       logger.New(dc.Name),
+		rarSemaphore: make(chan struct{}, 2),
+		config:       dc,
 	}
 
-	if _, err := r.GetProfile(); err != nil {
-		return nil, err
-	} else {
-		return r, nil
-	}
-}
-
-func (r *RealDebrid) Name() string {
-	return r.name
+	go func() {
+		_, _ = r.GetProfile()
+	}()
+	return r, nil
 }
 
 func (r *RealDebrid) Logger() zerolog.Logger {
@@ -179,7 +158,7 @@ func (r *RealDebrid) handleRarArchive(t *types.Torrent, data torrentInfo, select
 
 	files := make(map[string]types.File)
 
-	if !r.UnpackRar {
+	if !r.config.UnpackRar {
 		r.logger.Debug().Msgf("RAR file detected, but unpacking is disabled: %s. Falling back to single file representation.", t.Name)
 		return r.handleRarFallback(t, data)
 	}
@@ -248,7 +227,7 @@ func (r *RealDebrid) getTorrentFiles(t *types.Torrent, data torrentInfo) map[str
 
 	for _, f := range data.Files {
 		name := filepath.Base(f.Path)
-		if !r.addSamples && utils.IsSampleFile(f.Path) {
+		if !r.config.AddSamples && utils.IsSampleFile(f.Path) {
 			// Skip sample files
 			continue
 		}
@@ -343,7 +322,6 @@ func (r *RealDebrid) addTorrent(t *types.Torrent) (*types.Torrent, error) {
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		// Handle multiple_downloads
-
 		if resp.StatusCode == 509 {
 			return nil, utils.TooManyActiveDownloadsError
 		}
@@ -355,8 +333,7 @@ func (r *RealDebrid) addTorrent(t *types.Torrent) (*types.Torrent, error) {
 		return nil, err
 	}
 	t.Id = data.Id
-	t.Debrid = r.name
-	t.MountPath = r.MountPath
+	t.Debrid = r.config.Name
 	t.Added = time.Now().Format(time.RFC3339)
 	return t, nil
 }
@@ -387,8 +364,7 @@ func (r *RealDebrid) addMagnet(t *types.Torrent) (*types.Torrent, error) {
 		return nil, err
 	}
 	t.Id = data.Id
-	t.Debrid = r.name
-	t.MountPath = r.MountPath
+	t.Debrid = r.config.Name
 	t.Added = time.Now().Format(time.RFC3339)
 	return t, nil
 }
@@ -421,12 +397,11 @@ func (r *RealDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 		Speed:            data.Speed,
 		Seeders:          data.Seeders,
 		Added:            data.Added,
-		Status:           data.Status,
+		Status:           types.TorrentStatus(data.Status),
 		Filename:         data.Filename,
 		OriginalFilename: data.OriginalFilename,
 		Links:            data.Links,
-		Debrid:           r.name,
-		MountPath:        r.MountPath,
+		Debrid:           r.config.Name,
 	}
 	t.Files = r.getTorrentFiles(t, data) // Get selected files
 	return t, nil
@@ -455,14 +430,13 @@ func (r *RealDebrid) UpdateTorrent(t *types.Torrent) error {
 	t.Bytes = data.Bytes
 	t.Folder = data.OriginalFilename
 	t.Progress = data.Progress
-	t.Status = data.Status
+	t.Status = types.TorrentStatus(data.Status)
 	t.Speed = data.Speed
 	t.Seeders = data.Seeders
 	t.Filename = data.Filename
 	t.OriginalFilename = data.OriginalFilename
 	t.Links = data.Links
-	t.MountPath = r.MountPath
-	t.Debrid = r.name
+	t.Debrid = r.config.Name
 	t.Files, _ = r.getSelectedFiles(t, data) // Get selected files
 
 	return nil
@@ -481,7 +455,7 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
 		if err = json.Unmarshal(resp, &data); err != nil {
 			return t, err
 		}
-		status := data.Status
+		debridStatus := data.Status
 		t.Name = data.Filename // Important because some magnet changes the name
 		t.Folder = data.OriginalFilename
 		t.Filename = data.Filename
@@ -491,11 +465,11 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
 		t.Speed = data.Speed
 		t.Seeders = data.Seeders
 		t.Links = data.Links
-		t.Status = status
-		t.Debrid = r.name
-		t.MountPath = r.MountPath
+		t.Status = types.TorrentStatus(data.Status)
+		t.Debrid = r.config.Name
 		t.Added = data.Added
-		if status == "waiting_files_selection" {
+		if debridStatus == "waiting_files_selection" {
+			t.Status = types.TorrentStatusDownloading
 			t.Files = r.getTorrentFiles(t, data)
 			if len(t.Files) == 0 {
 				return t, fmt.Errorf("no valid files found")
@@ -519,7 +493,8 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
 				}
 				return t, fmt.Errorf("realdebrid API error: Status: %d", res.StatusCode)
 			}
-		} else if status == "downloaded" {
+		} else if debridStatus == "downloaded" {
+			t.Status = types.TorrentStatusCompleted
 			t.Files, err = r.getSelectedFiles(t, data) // Get selected files
 			if err != nil {
 				return t, err
@@ -527,13 +502,13 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
 
 			r.logger.Info().Msgf("Torrent: %s downloaded to RD", t.Name)
 			return t, nil
-		} else if utils.Contains(r.GetDownloadingStatus(), status) {
+		} else if utils.Contains(r.GetDownloadingStatus(), debridStatus) {
 			if !t.DownloadUncached {
 				return t, fmt.Errorf("torrent: %s not cached", t.Name)
 			}
 			return t, nil
 		} else {
-			return t, fmt.Errorf("torrent: %s has error: %s", t.Name, status)
+			return t, fmt.Errorf("torrent: %s has error: %s", t.Name, debridStatus)
 		}
 
 	}
@@ -746,14 +721,13 @@ func (r *RealDebrid) getTorrents(offset int, limit int) (int, []*types.Torrent, 
 			Name:             t.Filename,
 			Bytes:            t.Bytes,
 			Progress:         t.Progress,
-			Status:           t.Status,
+			Status:           types.TorrentStatusCompleted,
 			Filename:         t.Filename,
 			OriginalFilename: t.Filename,
 			Links:            t.Links,
 			Files:            make(map[string]types.File),
 			InfoHash:         t.Hash,
-			Debrid:           r.name,
-			MountPath:        r.MountPath,
+			Debrid:           r.config.Name,
 			Added:            t.Added.Format(time.RFC3339),
 		})
 		filenames[t.Filename] = struct{}{}
@@ -763,10 +737,10 @@ func (r *RealDebrid) getTorrents(offset int, limit int) (int, []*types.Torrent, 
 
 func (r *RealDebrid) GetTorrents() ([]*types.Torrent, error) {
 	limit := 5000
-	if r.limit != 0 {
-		limit = r.limit
+	if r.config.Limit != 0 {
+		limit = r.config.Limit
 	}
-	hardLimit := r.limit
+	hardLimit := r.config.Limit
 
 	// Get first batch and total count
 	allTorrents := make([]*types.Torrent, 0)
@@ -867,12 +841,8 @@ func (r *RealDebrid) GetDownloadingStatus() []string {
 	return []string{"downloading", "magnet_conversion", "queued", "compressing", "uploading"}
 }
 
-func (r *RealDebrid) GetDownloadUncached() bool {
-	return r.DownloadUncached
-}
-
-func (r *RealDebrid) GetMountPath() string {
-	return r.MountPath
+func (r *RealDebrid) Config() config.Debrid {
+	return r.config
 }
 
 func (r *RealDebrid) GetProfile() (*types.Profile, error) {
@@ -891,7 +861,7 @@ func (r *RealDebrid) GetProfile() (*types.Profile, error) {
 		return nil, err
 	}
 	profile := &types.Profile{
-		Name:       r.name,
+		Name:       r.config.Name,
 		Id:         data.Id,
 		Username:   data.Username,
 		Email:      data.Email,
@@ -914,7 +884,7 @@ func (r *RealDebrid) GetAvailableSlots() (int, error) {
 	if json.Unmarshal(resp, &data) != nil {
 		return 0, fmt.Errorf("error unmarshalling available slots response: %w", err)
 	}
-	return data.TotalSlots - data.ActiveSlots - r.minimumFreeSlot, nil // Ensure we maintain minimum active pots
+	return data.TotalSlots - data.ActiveSlots - r.config.MinimumFreeSlot, nil // Ensure we maintain minimum active pots
 }
 
 func (r *RealDebrid) AccountManager() *account.Manager {

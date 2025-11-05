@@ -4,8 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const { minify } = require('terser');
 
-const sourceDir = './pkg/web/assets/js';
-const buildDir = './pkg/web/assets/build/js';
+const sourceDir = './pkg/server/assets/js';
+const buildDir = './pkg/server/assets/build/js';
 
 // Create build directory
 if (!fs.existsSync(buildDir)) {

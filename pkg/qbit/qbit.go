@@ -4,37 +4,31 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/pkg/wire"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
 type QBit struct {
-	Username            string
-	Password            string
 	DownloadFolder      string
 	Categories          []string
 	AlwaysRmTrackerUrls bool
-	storage             *wire.TorrentStorage
 	logger              zerolog.Logger
 	Tags                []string
+	manager             *manager.Manager
 }
 
-func New() *QBit {
+func New(manager *manager.Manager) *QBit {
 	_cfg := config.Get()
-	cfg := _cfg.QBitTorrent
+	cfg := _cfg.Manager
 	return &QBit{
-		Username:            cfg.Username,
-		Password:            cfg.Password,
 		DownloadFolder:      cfg.DownloadFolder,
 		Categories:          cfg.Categories,
 		AlwaysRmTrackerUrls: cfg.AlwaysRmTrackerUrls,
-		storage:             wire.Get().Torrents(),
-		logger:         	 logger.New("qbit"),
+		manager:             manager,
+		logger:              logger.New("qbit"),
 	}
 }
 
 func (q *QBit) Reset() {
-	if q.storage != nil {
-		q.storage.Reset()
-	}
+	// Manager is a singleton, no reset needed
 	q.Tags = nil
 }

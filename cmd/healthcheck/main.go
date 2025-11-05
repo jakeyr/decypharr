@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/sirrobot01/decypharr/internal/config"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/sirrobot01/decypharr/internal/config"
 )
 
 // HealthStatus represents the status of various components
@@ -37,9 +38,7 @@ func main() {
 	port := getEnvOrDefault("QBIT_PORT", cfg.Port)
 	webdavPath := ""
 	for _, debrid := range cfg.Debrids {
-		if debrid.UseWebDav {
-			webdavPath = debrid.Name
-		}
+		webdavPath = debrid.Name
 	}
 
 	// Initialize status
