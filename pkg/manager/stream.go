@@ -69,7 +69,7 @@ func (m *Manager) Stream(ctx context.Context, torrentName, filename string, star
 
 		// Now we move the torrent to the next debrid service
 		m.logger.Info().
-			Str("torrent", torrent.Folder).
+			Str("torrent", torrent.GetFolder()).
 			Msg("Attempting to move torrent to another debrid service due to failed download link")
 
 		moveErr := m.MoveTorrent(ctx, torrent)

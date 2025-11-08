@@ -226,9 +226,7 @@ func (m *Manager) processSyncTorrent(t *types.Torrent, cachedMap *xsync.Map[stri
 			CreatedAt:        addedOn,
 			UpdatedAt:        time.Now(),
 		}
-		if mt.Folder == "" {
-			mt.Folder = storage.GetTorrentFolder(m.config.FolderNaming, mt)
-		}
+		mt.Folder = mt.GetFolder()
 		cachedMap.Store(mt.InfoHash, mt)
 	}
 

@@ -27,15 +27,15 @@ const (
 )
 
 type ImportRequest struct {
-	Id               string        `json:"id"`
-	DownloadFolder   string        `json:"downloadFolder"`
-	SelectedDebrid   string        `json:"debrid"`
-	Magnet           *utils.Magnet `json:"magnet"`
-	Arr              *arr.Arr      `json:"arr"`
-	Action           string        `json:"action"`
-	DownloadUncached bool          `json:"downloadUncached"`
-	CallBackUrl      string        `json:"callBackUrl"`
-	SkipMultiSeason  bool          `json:"skip_multi_season"`
+	Id               string                `json:"id"`
+	DownloadFolder   string                `json:"downloadFolder"`
+	SelectedDebrid   string                `json:"debrid"`
+	Magnet           *utils.Magnet         `json:"magnet"`
+	Arr              *arr.Arr              `json:"arr"`
+	Action           config.DownloadAction `json:"action"`
+	DownloadUncached bool                  `json:"downloadUncached"`
+	CallBackUrl      string                `json:"callBackUrl"`
+	SkipMultiSeason  bool                  `json:"skip_multi_season"`
 
 	Status      string    `json:"status"`
 	CompletedAt time.Time `json:"completedAt,omitempty"`
@@ -45,7 +45,7 @@ type ImportRequest struct {
 	Async bool       `json:"async"`
 }
 
-func NewImportRequest(debrid string, downloadFolder string, magnet *utils.Magnet, arr *arr.Arr, action string, downloadUncached bool, callBackUrl string, importType ImportType, skipMultiSeason bool) *ImportRequest {
+func NewImportRequest(debrid string, downloadFolder string, magnet *utils.Magnet, arr *arr.Arr, action config.DownloadAction, downloadUncached bool, callBackUrl string, importType ImportType, skipMultiSeason bool) *ImportRequest {
 	cfg := config.Get()
 	callBackUrl = cmp.Or(callBackUrl, cfg.CallbackURL)
 	return &ImportRequest{
@@ -117,7 +117,7 @@ func (q *Queue) ReQueue(importReq *ImportRequest) error {
 }
 
 func (q *Queue) Add(torrent *storage.Torrent) error {
-	return q.storage.AddOrUpdateQueue(torrent)
+	return q.storage.AddQueue(torrent)
 }
 
 func (q *Queue) GetTorrent(infohash, category string) (*storage.Torrent, error) {
@@ -141,7 +141,7 @@ func (q *Queue) DeleteStalled() error {
 
 func (q *Queue) Update(torrent *storage.Torrent) error {
 	// Update the state here
-	return q.storage.AddOrUpdateQueue(torrent)
+	return q.storage.UpdateQueue(torrent)
 }
 
 func (q *Queue) ListFilterFunc(category, state string, hashes []string) func(*storage.Torrent) bool {

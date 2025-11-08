@@ -21,6 +21,7 @@ func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) e
 	torrent := &storage.Torrent{
 		InfoHash:         importReq.Magnet.InfoHash,
 		Name:             importReq.Magnet.Name,
+		OriginalFilename: importReq.Magnet.Name,
 		Size:             importReq.Magnet.Size,
 		Bytes:            importReq.Magnet.Size,
 		Magnet:           importReq.Magnet.Link,
@@ -40,17 +41,67 @@ func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) e
 		Tags:             []string{},
 	}
 
-	if torrent.Folder == "" {
-		torrent.Folder = storage.GetTorrentFolder(m.config.FolderNaming, torrent)
-	}
+	torrent.Folder = torrent.GetFolder()
 
-	// Save to storage
+	// Save to queue
 	if err := m.queue.Add(torrent); err != nil {
 		return fmt.Errorf("failed to save torrent: %w", err)
 	}
 
+	var (
+		debridTorrent *debridTypes.Torrent
+	)
+
+	// Check if already exists in storage/It's already download
+	existing, err := m.storage.Get(torrent.InfoHash)
+	if err == nil && existing != nil && existing.IsValid() {
+		m.logger.Info().
+			Str("name", torrent.Name).
+			Str("info_hash", torrent.InfoHash).
+			Msg("Torrent already exists in storage, skipping submitting to debrid")
+		placement := existing.GetActivePlacement()
+		if placement != nil {
+			client := m.DebridClient(placement.Debrid)
+			if client != nil {
+				debridTorrent, err = client.GetTorrent(placement.ID)
+			}
+		}
+	}
+
+	if debridTorrent == nil {
+		// Submit to debrid using integrated method
+		debridTorrent, err = m.SendToDebrid(ctx, importReq)
+		if err != nil {
+			// Check if too many active downloads
+			var httpErr *utils.HTTPError
+			if errors.As(err, &httpErr) && httpErr.Code == "too_many_active_downloads" {
+				m.logger.Warn().Msgf("Too many active downloads, marking as queued: %s", torrent.Name)
+				torrent.Status = debridTypes.TorrentStatusQueued
+				torrent.UpdatedAt = time.Now()
+				if err := m.queue.ReQueue(importReq); err != nil {
+					return err
+				}
+				_ = m.queue.Update(torrent)
+				return nil
+			}
+
+			m.logger.Error().Err(err).Str("name", torrent.Name).Msg("Failed to submit torrent to debrid")
+			torrent.MarkAsError(err)
+			_ = m.queue.Update(torrent)
+			return nil
+		}
+	}
+
 	// Process in background
-	go m.processNewTorrent(ctx, torrent, importReq)
+	go func() {
+		err := m.processNewTorrent(ctx, torrent, debridTorrent)
+		if err != nil {
+			m.logger.Error().Err(err).Str("name", torrent.Name).Msg("Error processing new torrent")
+			torrent.MarkAsError(err)
+			_ = m.queue.Update(torrent)
+			return
+		}
+	}()
 
 	return nil
 }
@@ -164,20 +215,27 @@ func (m *Manager) processQueuedTorrent(ctx context.Context, torrent *storage.Tor
 		Float64("progress", debridTorrent.Progress).
 		Msg("Download progress")
 
+	links, err := client.GetFileDownloadLinks(debridTorrent)
+	if err != nil {
+		m.logger.Error().Err(err).Str("name", torrent.Name).Msg("Failed to get file download links")
+		torrent.MarkAsError(err)
+		_ = m.queue.Update(torrent)
+		return
+	}
+
 	// Check if done or failed
 	if debridTorrent.Status == debridTypes.TorrentStatusDownloaded {
-		m.processAction(torrent, debridTorrent)
+		m.processAction(torrent, links)
 	}
 }
 
-func (m *Manager) processAction(torrent *storage.Torrent, debridTorrent *debridTypes.Torrent) {
+func (m *Manager) processAction(torrent *storage.Torrent, links map[string]debridTypes.DownloadLink) {
 	torrent.Status = debridTypes.TorrentStatusDownloaded
 	torrent.UpdatedAt = time.Now()
 	_ = m.queue.Update(torrent)
 	m.logger.Info().
-		Str("debrid", debridTorrent.Debrid).
-		Str("name", debridTorrent.Name).
-		Str("action", torrent.Action).
+		Str("name", torrent.Name).
+		Str("action", string(torrent.Action)).
 		Msg("Download completed, processing action")
 
 	// Now add torrent to the main storage
@@ -186,55 +244,28 @@ func (m *Manager) processAction(torrent *storage.Torrent, debridTorrent *debridT
 	}); err != nil {
 		return
 	}
-
-	switch torrent.Action {
-	case "symlink":
-		m.processSymlinkAction(torrent, debridTorrent)
-	case "download":
-		// get all files links
-		m.processDownloadAction(torrent, debridTorrent)
-	default:
-		m.markDownloadAsComplete(debridTorrent, torrent)
+	err := m.downloader.download(torrent, links)
+	if err != nil {
+		return
 	}
 }
 
 // processTorrent handles the complete torrent lifecycle
-func (m *Manager) processNewTorrent(ctx context.Context, torrent *storage.Torrent, importReq *ImportRequest) {
+func (m *Manager) processNewTorrent(ctx context.Context, torrent *storage.Torrent, debridTorrent *debridTypes.Torrent) error {
 	// Update status to submitting
 	torrent.Status = debridTypes.TorrentStatusDownloading
 	torrent.UpdatedAt = time.Now()
 	_ = m.queue.Update(torrent)
 
-	// Submit to debrid using integrated method
-	debridTorrent, err := m.SendToDebrid(ctx, importReq)
-	if err != nil {
-		// Check if too many active downloads
-		var httpErr *utils.HTTPError
-		if errors.As(err, &httpErr) && httpErr.Code == "too_many_active_downloads" {
-			m.logger.Warn().Msgf("Too many active downloads, marking as queued: %s", torrent.Name)
-			torrent.Status = debridTypes.TorrentStatusQueued
-			torrent.UpdatedAt = time.Now()
-			if err := m.queue.ReQueue(importReq); err != nil {
-				m.logger.Error().Err(err).Msg("Failed to re-queue torrent")
-				return
-			}
-			_ = m.queue.Update(torrent)
-			return
-		}
-
-		m.logger.Error().Err(err).Str("name", torrent.Name).Msg("Failed to submit torrent to debrid")
-		torrent.MarkAsError(err)
-		_ = m.queue.Update(torrent)
-		return
-	}
-
 	// AddOrUpdate placement
-	placement := torrent.AddPlacement(debridTorrent)
-	placement.IsActive = true
+	_ = torrent.AddPlacement(debridTorrent)
 	torrent.ActiveDebrid = debridTorrent.Debrid
 	torrent.Status = debridTypes.TorrentStatusDownloading
 	torrent.Bytes = debridTorrent.GetSize()
 	torrent.Size = debridTorrent.GetSize()
+	torrent.Name = debridTorrent.Name
+	torrent.OriginalFilename = debridTorrent.OriginalFilename
+	torrent.Folder = torrent.GetFolder()
 	torrent.UpdatedAt = time.Now()
 	// AddOrUpdate files here
 	for _, file := range debridTorrent.Files {
@@ -252,10 +283,7 @@ func (m *Manager) processNewTorrent(ctx context.Context, torrent *storage.Torren
 	// Get debrid client
 	client := m.DebridClient(debridTorrent.Debrid)
 	if client == nil {
-		m.logger.Error().Str("debrid", debridTorrent.Debrid).Msg("Debrid client not found")
-		torrent.MarkAsError(fmt.Errorf("debrid client not found: %s", debridTorrent.Debrid))
-		_ = m.queue.Update(torrent)
-		return
+		return fmt.Errorf("debrid client not found: %s", debridTorrent.Debrid)
 	}
 
 	if debridTorrent.Status != debridTypes.TorrentStatusDownloaded {
@@ -263,7 +291,7 @@ func (m *Manager) processNewTorrent(ctx context.Context, torrent *storage.Torren
 			Str("debrid", debridTorrent.Debrid).
 			Str("name", debridTorrent.Name).
 			Msg("Started downloading torrent")
-		return
+		return nil
 	}
 
 	// Mark placement as downloaded
@@ -273,14 +301,14 @@ func (m *Manager) processNewTorrent(ctx context.Context, torrent *storage.Torren
 		placement.Progress = 1.0
 	}
 
-	if err := client.GetFileDownloadLinks(debridTorrent); err != nil {
-		m.logger.Error().Err(err).Str("name", torrent.Name).Msg("Failed to get file download links")
-		m.markDownloadAsError(debridTorrent, torrent, err)
-		return
+	links, err := client.GetFileDownloadLinks(debridTorrent)
+	if err != nil {
+		return fmt.Errorf("failed to get file download links: %w", err)
 	}
 
 	// Process post-download action
-	m.processAction(torrent, debridTorrent)
+	go m.processAction(torrent, links)
+	return nil
 }
 
 // SendToDebrid submits a magnet to debrid service(s) - replaces debrid.Process
@@ -321,7 +349,7 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 			Str("Arr", importRequest.Arr.Name).
 			Str("Hash", debridTorrent.InfoHash).
 			Str("Name", debridTorrent.Name).
-			Str("Action", importRequest.Action).
+			Str("Action", string(importRequest.Action)).
 			Msg("Processing torrent")
 
 		// If debrid.DownloadUncached is true, it overrides everything

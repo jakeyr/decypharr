@@ -134,7 +134,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 				"error":   fmt.Sprintf("failed to get mount stats: %v", err),
 				"type":    mountManager.Type(),
 				"ready":   true,
-				"enabled": cfg.Mount.Type != config.MountTypeExternalRclone,
+				"enabled": cfg.Mount.Type != config.MountTypeNone,
 			}
 		} else {
 			stats["mount"] = mountStats
@@ -143,7 +143,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		// No mount enabled or not ready
 		stats["mount"] = map[string]interface{}{
 			"ready":   false,
-			"enabled": cfg.Mount.Type != config.MountTypeExternalRclone,
+			"enabled": cfg.Mount.Type != config.MountTypeNone,
 		}
 	}
 

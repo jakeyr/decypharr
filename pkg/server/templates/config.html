@@ -103,6 +103,13 @@
                                     <input type="number" class="input w-full" id="port" name="port" placeholder="8282">
                                         <span class="text-sm opacity-70">Application port</span>
                                 </div>
+                                <div>
+                                    <label class="label" for="appUrl">
+                                        <span class="font-medium">Application URL</span>
+                                    </label>
+                                    <input type="text" class="input w-full" id="appUrl" name="appUrl" placeholder="http://192.168.0.1:8282">
+                                        <span class="text-sm opacity-70">Full URL to access to the application</span>
+                                </div>
                             </div>
 
                             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -167,6 +174,17 @@
                                             </label>
                                             <input type="text" class="input w-full" name="download_folder" id="download_folder">
                                             <span class="text-sm opacity-70">Folder where downloaded files will be stored</span>
+                                        </div>
+                                        <div>
+                                            <label class="label" for="default_download_action">
+                                                <span class="font-medium">Default Download Action</span>
+                                            </label>
+                                            <select class="select w-full" name="default_download_action" id="default_download_action">
+                                                <option value="symlink">Create Symlink</option>
+                                                <option value="strm">Create STRM Files</option>
+                                                <option value="download">Download Files</option>
+                                                <option value="none">No Action</option>
+                                            </select>
                                         </div>
                                         <div>
                                             <label class="label" for="refresh_interval">
@@ -457,43 +475,48 @@
                                 <i class="bi bi-hdd-stack mr-3 text-info"></i>Mount Settings
                             </h2>
 
-                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                                <div>
-                                    <label class="label">
-                                        <span class="font-medium">Mount Type</span>
+                            <div>
+                                <label class="label">
+                                    <span class="font-medium">Mount Type</span>
+                                </label>
+                                <div class="">
+                                    <label class="label cursor-pointer justify-start gap-3 p-3 border border-base-300 rounded-lg hover:bg-base-200 transition-colors">
+                                        <input type="radio" class="radio radio-primary" name="mount.type" value="dfs" id="mount.type.dfs" checked>
+                                        <div>
+                                            <span class="font-medium">DFS (Decypharr Filesystem)</span>
+                                            <div class="label-text-alt">Built-in filesystem implementation</div>
+                                        </div>
                                     </label>
-                                    <div class="space-y-2">
-                                        <label class="label cursor-pointer justify-start gap-3 p-3 border border-base-300 rounded-lg hover:bg-base-200 transition-colors">
-                                            <input type="radio" class="radio radio-primary" name="mount.type" value="dfs" id="mount.type.dfs" checked>
-                                            <div>
-                                                <span class="font-medium">DFS (Decypharr Filesystem)</span>
-                                                <div class="label-text-alt">Built-in filesystem implementation</div>
-                                            </div>
-                                        </label>
-                                        <label class="label cursor-pointer justify-start gap-3 p-3 border border-base-300 rounded-lg hover:bg-base-200 transition-colors">
-                                            <input type="radio" class="radio radio-primary" name="mount.type" value="rclone" id="mount.type.rclone">
-                                            <div>
-                                                <span class="font-medium">Rclone</span>
-                                                <div class="label-text-alt">Managed rclone mount</div>
-                                            </div>
-                                        </label>
-                                        <label class="label cursor-pointer justify-start gap-3 p-3 border border-base-300 rounded-lg hover:bg-base-200 transition-colors">
-                                            <input type="radio" class="radio radio-primary" name="mount.type" value="external_rclone" id="mount.type.external_rclone">
-                                            <div>
-                                                <span class="font-medium">External Rclone</span>
-                                                <div class="label-text-alt">Connect to existing rclone instance</div>
-                                            </div>
-                                        </label>
-                                    </div>
-                                    <span class="text-sm opacity-70">Select the mount type to use for debrid items</span>
-                                </div>
-                                <div>
-                                    <label class="label" for="mount.mount_path">
-                                        <span class="font-medium">Mount Path</span>
+                                    <label class="label cursor-pointer justify-start gap-3 p-3 border border-base-300 rounded-lg hover:bg-base-200 transition-colors">
+                                        <input type="radio" class="radio radio-primary" name="mount.type" value="rclone" id="mount.type.rclone">
+                                        <div>
+                                            <span class="font-medium">Rclone</span>
+                                            <div class="label-text-alt">Managed rclone mount</div>
+                                        </div>
                                     </label>
-                                    <input type="text" class="input w-full" name="mount.mount_path" id="mount.mount_path" placeholder="/mnt/dfs">
-                                    <span class="text-sm opacity-70">Base directory where providers will be mounted</span>
+                                    <label class="label cursor-pointer justify-start gap-3 p-3 border border-base-300 rounded-lg hover:bg-base-200 transition-colors">
+                                        <input type="radio" class="radio radio-primary" name="mount.type" value="external_rclone" id="mount.type.external_rclone">
+                                        <div>
+                                            <span class="font-medium">External Rclone</span>
+                                            <div class="label-text-alt">Connect to existing rclone instance</div>
+                                        </div>
+                                    </label>
+                                    <label class="label cursor-pointer justify-start gap-3 p-3 border border-base-300 rounded-lg hover:bg-base-200 transition-colors">
+                                        <input type="radio" class="radio radio-primary" name="mount.type" value="none" id="mount.type.none">
+                                        <div>
+                                            <span class="font-medium">No Mount</span>
+                                            <div class="label-text-alt">Disable mounting functionality</div>
+                                        </div>
+                                    </label>
                                 </div>
+                                <span class="text-sm opacity-70">Select the mount type to use for debrid items</span>
+                            </div>
+                            <div>
+                                <label class="label" for="mount.mount_path">
+                                    <span class="font-medium">Mount Path</span>
+                                </label>
+                                <input type="text" class="input w-full" name="mount.mount_path" id="mount.mount_path" placeholder="/mnt/dfs">
+                                <span class="text-sm opacity-70">Base directory where providers will be mounted</span>
                             </div>
 
                             <!-- Sub-tabs for mount types -->
@@ -1007,7 +1030,6 @@
 
                 </div>
             </div>
-        </div>
     </form>
 </div>
 

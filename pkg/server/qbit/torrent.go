@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"time"
 
+	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/manager"
@@ -14,7 +15,7 @@ import (
 )
 
 // All torrent-related helpers goes here
-func (q *QBit) addMagnet(ctx context.Context, url string, arr *arr.Arr, debrid string, action string, rmTrackerUrls bool) error {
+func (q *QBit) addMagnet(ctx context.Context, url string, arr *arr.Arr, debrid string, action config.DownloadAction, rmTrackerUrls bool) error {
 	magnet, err := utils.GetMagnetFromUrl(url, rmTrackerUrls)
 	if err != nil {
 		return fmt.Errorf("error parsing magnet link: %w", err)
@@ -29,7 +30,7 @@ func (q *QBit) addMagnet(ctx context.Context, url string, arr *arr.Arr, debrid s
 	return nil
 }
 
-func (q *QBit) addTorrent(ctx context.Context, fileHeader *multipart.FileHeader, arr *arr.Arr, debrid string, action string, rmTrackerUrls bool) error {
+func (q *QBit) addTorrent(ctx context.Context, fileHeader *multipart.FileHeader, arr *arr.Arr, debrid string, action config.DownloadAction, rmTrackerUrls bool) error {
 	file, _ := fileHeader.Open()
 	defer file.Close()
 	var reader io.Reader = file

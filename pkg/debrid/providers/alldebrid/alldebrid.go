@@ -303,7 +303,7 @@ func (ad *AllDebrid) DeleteTorrent(torrentId string) error {
 	return nil
 }
 
-func (ad *AllDebrid) GetFileDownloadLinks(t *types.Torrent) error {
+func (ad *AllDebrid) GetFileDownloadLinks(t *types.Torrent) (map[string]types.DownloadLink, error) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var firstErr error
@@ -318,7 +318,7 @@ func (ad *AllDebrid) GetFileDownloadLinks(t *types.Torrent) error {
 		go func(file types.File) {
 			defer wg.Done()
 
-			link, err := ad.GetDownloadLink(t, &file)
+			link, err := ad.GetDownloadLink(t.Id, &file)
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -347,15 +347,15 @@ func (ad *AllDebrid) GetFileDownloadLinks(t *types.Torrent) error {
 	wg.Wait()
 
 	if firstErr != nil {
-		return firstErr
+		return nil, firstErr
 	}
 
 	// AddOrUpdate links to cache
 	t.Files = files
-	return nil
+	return links, nil
 }
 
-func (ad *AllDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (types.DownloadLink, error) {
+func (ad *AllDebrid) GetDownloadLink(id string, file *types.File) (types.DownloadLink, error) {
 	url := "/link/unlock"
 	var data DownloadLink
 

@@ -40,7 +40,6 @@ type Manager struct {
 	config *config.Config
 
 	// Processing workers
-	downloadSem  chan struct{}
 	skipPreCache bool
 	scheduler    gocron.Scheduler
 	cetScheduler gocron.Scheduler
@@ -68,8 +67,9 @@ type Manager struct {
 
 	event *Event
 
-	rootInfo *FileInfo
-	entry    *EntryCache
+	rootInfo   *FileInfo
+	entry      *EntryCache
+	downloader *Downloader
 }
 
 // New creates a new Manager instance
@@ -142,7 +142,6 @@ func New() *Manager {
 		clients:              xsync.NewMap[string, debrid.Client](),
 		logger:               _logger,
 		migrationJobs:        xsync.NewMap[string, *storage.SwitcherJob](),
-		downloadSem:          make(chan struct{}, cfg.MaxDownloads),
 		config:               cfg,
 		arr:                  arr.NewStorage(),
 		queue:                newQueue(ctx, strg, 1000, cfg.RemoveStalledAfter),
@@ -179,7 +178,6 @@ func (m *Manager) init() {
 	}
 
 	m.config = cfg
-	m.downloadSem = make(chan struct{}, cfg.MaxDownloads)
 
 	// Recreate queue with new config
 	m.queue = newQueue(m.ctx, m.storage, 1000, cfg.RemoveStalledAfter)
@@ -194,6 +192,7 @@ func (m *Manager) init() {
 	m.scheduler = scheduler
 	m.cetScheduler = cetScheduler
 	m.migrator = NewMigrator(m.storage)
+	m.downloader = NewDownloadManager(m)
 
 	refreshInterval, err := time.ParseDuration(cfg.RefreshInterval)
 	if err != nil {
@@ -430,7 +429,12 @@ func (m *Manager) DeleteTorrent(infohash string, removePlacements bool) error {
 		go m.RemoveTorrentPlacements(torr)
 	}
 
-	return m.storage.Delete(infohash)
+	if err := m.storage.Delete(infohash); err != nil {
+		return err
+	}
+	// Refresh entry cache
+	m.RefreshEntries(true)
+	return nil
 }
 
 func (m *Manager) DeleteTorrents(infohashes []string, removeFromDebrid bool) error {

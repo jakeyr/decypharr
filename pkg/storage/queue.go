@@ -8,7 +8,28 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-func (s *Storage) AddOrUpdateQueue(torrent *Torrent) error {
+func (s *Storage) AddQueue(torrent *Torrent) error {
+	torrent.CreatedAt = time.Now()
+	torrent.UpdatedAt = time.Now()
+	torrent.State = torrent.GetState()
+
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(queuedBucket))
+		if bucket == nil {
+			return fmt.Errorf("queued bucket not found")
+		}
+
+		data, err := msgpack.Marshal(torrent)
+		if err != nil {
+			return fmt.Errorf("failed to marshal queued torrent: %w", err)
+		}
+
+		key := []byte(torrent.InfoHash + ":" + torrent.Category)
+		return bucket.Put(key, data)
+	})
+}
+
+func (s *Storage) UpdateQueue(torrent *Torrent) error {
 	torrent.UpdatedAt = time.Now()
 	torrent.State = torrent.GetState()
 

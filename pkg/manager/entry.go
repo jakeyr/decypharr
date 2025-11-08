@@ -46,23 +46,10 @@ func (f *FileInfo) CanDelete() bool      { return f.canDelete }
 func (f *FileInfo) IsRemote() bool       { return len(f.content) == 0 }
 func (f *FileInfo) ByteRange() *[2]int64 { return f.byteRange }
 
-func CreateFileInfo(name string, size int64, isDir bool, modTime time.Time) *FileInfo {
-	return &FileInfo{
-		name:    name,
-		size:    size,
-		isDir:   isDir,
-		modTime: modTime,
-	}
-}
-
 // GetTorrentMountPath returns the full mount path for a torrent
 // Returns the path based on the new unified mount structure
 func (m *Manager) GetTorrentMountPath(torrent *storage.Torrent) string {
-	torrentFolder := torrent.Folder
-	if torrentFolder == "" {
-		torrentFolder = storage.GetTorrentFolder(m.config.FolderNaming, torrent)
-	}
-	return filepath.Join(m.config.Mount.MountPath, torrent.ActiveDebrid, EntryAllFolder, torrentFolder)
+	return filepath.Join(m.config.Mount.MountPath, torrent.ActiveDebrid, EntryAllFolder, torrent.GetFolder())
 }
 
 func (m *Manager) getAlphabeticalBucket(name string) string {

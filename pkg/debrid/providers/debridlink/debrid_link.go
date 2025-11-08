@@ -350,16 +350,23 @@ func (dl *DebridLink) DeleteTorrent(torrentId string) error {
 	return nil
 }
 
-func (dl *DebridLink) GetFileDownloadLinks(t *types.Torrent) error {
-	// Download links are already generated
-	return nil
+func (dl *DebridLink) GetFileDownloadLinks(t *types.Torrent) (map[string]types.DownloadLink, error) {
+	links := make(map[string]types.DownloadLink)
+	for _, file := range t.Files {
+		link, err := dl.accountsManager.GetDownloadLink(file.Link)
+		if err != nil {
+			return links, err
+		}
+		links[file.Name] = link
+	}
+	return links, nil
 }
 
 func (dl *DebridLink) RefreshDownloadLinks() error {
 	return nil
 }
 
-func (dl *DebridLink) GetDownloadLink(t *types.Torrent, file *types.File) (types.DownloadLink, error) {
+func (dl *DebridLink) GetDownloadLink(id string, file *types.File) (types.DownloadLink, error) {
 	return dl.accountsManager.GetDownloadLink(file.Link)
 }
 

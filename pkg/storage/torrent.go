@@ -32,7 +32,7 @@ func (s *Storage) AddOrUpdate(torrent *Torrent) error {
 		}
 
 		// Store name index: folder name -> infohash
-		nameKey := []byte(torrent.Folder)
+		nameKey := []byte(torrent.GetFolder())
 		if err := nameIdxBkt.Put(nameKey, []byte(torrent.InfoHash)); err != nil {
 			return fmt.Errorf("failed to set name index: %w", err)
 		}

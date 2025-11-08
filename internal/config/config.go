@@ -19,12 +19,21 @@ type (
 	RepairStrategy     string
 	WebDavFolderNaming string
 	MountType          string
+	DownloadAction     string
 )
 
 const (
 	MountTypeRclone         MountType = "rclone"
 	MountTypeDFS            MountType = "dfs"
 	MountTypeExternalRclone MountType = "external_rclone"
+	MountTypeNone           MountType = "none"
+)
+
+const (
+	DownloadActionSymlink  DownloadAction = "symlink"
+	DownloadActionDownload DownloadAction = "download"
+	DownloadActionStrm     DownloadAction = "strm"
+	DownloadActionNone     DownloadAction = "none"
 )
 
 const (
@@ -215,14 +224,17 @@ type Config struct {
 	// server
 	BindAddress string `json:"bind_address,omitempty"`
 	URLBase     string `json:"url_base,omitempty"`
+	AppURL      string `json:"app_url,omitempty"`
 	Port        string `json:"port,omitempty"`
 
-	LogLevel    string      `json:"log_level,omitempty"`
-	Debrids     []Debrid    `json:"debrids,omitempty"`
+	LogLevel string   `json:"log_level,omitempty"`
+	Debrids  []Debrid `json:"debrids,omitempty"`
+
+	Arrs   []Arr  `json:"arrs,omitempty"`
+	Repair Repair `json:"repair,omitempty"`
+
 	QBitTorrent QBitTorrent `json:"qbittorrent,omitempty"` // Deprecated: use Manager instead
-	Arrs        []Arr       `json:"arrs,omitempty"`
-	Repair      Repair      `json:"repair,omitempty"`
-	Rclone      Rclone      `json:"rclone,omitempty"` // Deprecated: use Mounts instead
+	Rclone      Rclone      `json:"rclone,omitempty"`      // Deprecated: use Mounts instead
 	Mount       Mount       `json:"mount,omitempty"`
 
 	AllowedExt         []string `json:"allowed_file_types,omitempty"`
@@ -238,14 +250,15 @@ type Config struct {
 
 	// Manager
 
-	DownloadFolder      string                   `json:"download_folder,omitempty"`
-	RefreshInterval     string                   `json:"refresh_interval,omitempty"`
-	MaxDownloads        int                      `json:"max_downloads,omitempty"`
-	SkipPreCache        bool                     `json:"skip_pre_cache,omitempty"`
-	AlwaysRmTrackerUrls bool                     `json:"always_rm_tracker_urls,omitempty"`
-	Categories          []string                 `json:"categories,omitempty"`
-	FolderNaming        WebDavFolderNaming       `json:"folder_naming,omitempty"`
-	CustomFolders       map[string]CustomFolders `json:"custom_folders,omitempty"`
+	DownloadFolder        string                   `json:"download_folder,omitempty"`
+	RefreshInterval       string                   `json:"refresh_interval,omitempty"`
+	MaxDownloads          int                      `json:"max_downloads,omitempty"`
+	SkipPreCache          bool                     `json:"skip_pre_cache,omitempty"`
+	AlwaysRmTrackerUrls   bool                     `json:"always_rm_tracker_urls,omitempty"`
+	Categories            []string                 `json:"categories,omitempty"`
+	FolderNaming          WebDavFolderNaming       `json:"folder_naming,omitempty"`
+	CustomFolders         map[string]CustomFolders `json:"custom_folders,omitempty"`
+	DefaultDownloadAction DownloadAction           `json:"default_download_action,omitempty"`
 
 	RefreshDirs  string `json:"refresh_dirs,omitempty"`
 	Retries      int    `json:"retries,omitempty"`
@@ -944,6 +957,11 @@ func (c *Config) Save() error {
 		return err
 	}
 	return nil
+}
+
+func Reset() {
+	once = sync.Once{}
+	instance = nil
 }
 
 func (c *Config) createConfig() error {

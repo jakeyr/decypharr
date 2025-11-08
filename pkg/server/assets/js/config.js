@@ -938,6 +938,7 @@ class ConfigManager {
             log_level: document.getElementById('log-level').value,
             url_base: document.getElementById('urlBase').value,
             bind_address: document.getElementById('bindAddress').value,
+            app_url: document.getElementById('appUrl').value,
             port: document.getElementById('port').value ? document.getElementById('port').value : null,
             discord_webhook_url: document.getElementById('discordWebhookUrl').value,
             allowed_file_types: document.getElementById('allowedExtensions').value
@@ -1048,7 +1049,7 @@ class ConfigManager {
         const selectedMountType = document.querySelector('input[name="mount.type"]:checked');
 
         return {
-            type: selectedMountType ? selectedMountType.value : 'dfs',
+            type: selectedMountType ? selectedMountType.value : 'none',
             mount_path: document.querySelector('[name="mount.mount_path"]').value,
             dfs: this.collectDFSConfig(),
             rclone: this.collectRcloneConfig(),

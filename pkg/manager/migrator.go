@@ -339,7 +339,6 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 			ID:       other.ID,
 			AddedAt:  addedAt,
 			Status:   status,
-			IsActive: false, // Will set one as active later
 			Progress: other.Progress / 100.0,
 			Files:    make(map[string]*storage.PlacementFile),
 		}
@@ -391,7 +390,6 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 func (m *Migrator) activateBestPlacement(torrent *storage.Torrent) {
 	for debrid, placement := range torrent.Placements {
 		if placement.Status == debridTypes.TorrentStatusDownloaded {
-			placement.IsActive = true
 			torrent.ActiveDebrid = debrid
 			return
 		}

@@ -3,7 +3,6 @@ package storage
 import (
 	"fmt"
 	"path"
-	"strings"
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -41,9 +40,14 @@ type Torrent struct {
 	Bytes            int64  `msgpack:"bytes" json:"bytes"`                         // Actual bytes (debrid uses this)
 	Magnet           string `msgpack:"magnet,omitempty" json:"magnet,omitempty"`   // Magnet link
 
+	IsDownloading  bool  `msgpack:"is_downloading,omitempty" json:"is_downloading,omitempty"`   // Whether currently downloading(this is for local download)
+	SizeDownloaded int64 `msgpack:"size_downloaded,omitempty" json:"size_downloaded,omitempty"` // Actual downloaded bytes
+
+	HasDuplicates bool `msgpack:"has_duplicates,omitempty" json:"has_duplicates,omitempty"` // Whether duplicates exist for this torrent
+
 	// Multi-Debrid Placement Strategy
 	ActiveDebrid string                `msgpack:"active_debrid" json:"active_debrid"` // Current active debrid
-	Placements   map[string]*Placement `msgpack:"placements" json:"placements"`       // debrid_name -> placement
+	Placements   map[string]*Placement `msgpack:"placements" json:"placements"`       // debrid_name:infohash -> Placement details
 
 	// Files (from debrid cache)
 	Files map[string]*File `msgpack:"files" json:"files"` // filename -> File details
@@ -73,10 +77,10 @@ type Torrent struct {
 	ImportedAt  *time.Time `msgpack:"imported_at,omitempty" json:"imported_at,omitempty"`   // When imported by Arr
 
 	// Import Request Data (for processing)
-	Action           string `msgpack:"action,omitempty" json:"action,omitempty"`                       // symlink, download, none
-	DownloadUncached bool   `msgpack:"download_uncached,omitempty" json:"download_uncached,omitempty"` // Force uncached download
-	CallbackURL      string `msgpack:"callback_url,omitempty" json:"callback_url,omitempty"`           // Callback URL for completion
-	SkipMultiSeason  bool   `msgpack:"skip_multi_season,omitempty" json:"skip_multi_season,omitempty"` // Skip multi-season detection
+	Action           config.DownloadAction `msgpack:"action,omitempty" json:"action,omitempty"`                       // symlink, download, strm none
+	DownloadUncached bool                  `msgpack:"download_uncached,omitempty" json:"download_uncached,omitempty"` // Force uncached download
+	CallbackURL      string                `msgpack:"callback_url,omitempty" json:"callback_url,omitempty"`           // Callback URL for completion
+	SkipMultiSeason  bool                  `msgpack:"skip_multi_season,omitempty" json:"skip_multi_season,omitempty"` // Skip multi-season detection
 
 	// Error tracking
 	LastError     string     `msgpack:"last_error,omitempty" json:"last_error,omitempty"`           // Last error message
@@ -86,6 +90,7 @@ type Torrent struct {
 
 type File struct {
 	Name      string    `msgpack:"name" json:"name"`
+	Path      string    `msgpack:"path,omitempty" json:"path,omitempty"`
 	Size      int64     `msgpack:"size" json:"size"`
 	IsRar     bool      `msgpack:"is_rar" json:"is_rar"`
 	ByteRange *[2]int64 `msgpack:"byte_range,omitempty" json:"byte_range,omitempty"`
@@ -106,7 +111,6 @@ type Placement struct {
 	AddedAt   time.Time                 `msgpack:"added_at" json:"added_at"`                         // When added to this debrid
 	RemovedAt *time.Time                `msgpack:"removed_at,omitempty" json:"removed_at,omitempty"` // When removed (if archived)
 	Status    debridTypes.TorrentStatus `msgpack:"status" json:"status"`                             // Placement status
-	IsActive  bool                      `msgpack:"is_active" json:"is_active"`                       // Whether this is the active placement
 	Progress  float64                   `msgpack:"progress" json:"progress"`                         // Download progress on this debrid (0-100)
 
 	// Debrid-specific file information
@@ -114,6 +118,19 @@ type Placement struct {
 
 	// Cached data from debrid (avoid re-fetching)
 	DownloadedAt *time.Time `msgpack:"downloaded_at,omitempty" json:"downloaded_at,omitempty"` // When download completed on debrid
+}
+
+func (p *Placement) IsValid() bool {
+	if p.ID == "" || p.Debrid == "" {
+		return false
+	}
+	// Check if all files have necessary info
+	for _, pf := range p.Files {
+		if pf.Id == "" || pf.Link == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // GetActivePlacement returns the active placement
@@ -131,12 +148,11 @@ func (t *Torrent) AddPlacement(debridTorrent *debridTypes.Torrent) *Placement {
 	}
 
 	placement := &Placement{
-		Debrid:   debridTorrent.Debrid,
-		ID:       debridTorrent.Id,
-		AddedAt:  time.Now(),
-		Status:   debridTorrent.Status,
-		Files:    make(map[string]*PlacementFile),
-		IsActive: false, // Will be set when activating
+		Debrid:  debridTorrent.Debrid,
+		ID:      debridTorrent.Id,
+		AddedAt: time.Now(),
+		Status:  debridTorrent.Status,
+		Files:   make(map[string]*PlacementFile),
 	}
 
 	t.Placements[debridTorrent.Debrid] = placement
@@ -149,16 +165,10 @@ func (t *Torrent) ActivatePlacement(debridName string) error {
 		return ErrPlacementNotFound
 	}
 
-	// Deactivate all placements
-	for _, p := range t.Placements {
-		p.IsActive = false
-	}
 	if t.Placements[debridName].Status != debridTypes.TorrentStatusDownloaded {
 		return ErrPlacementNotCompleted
 	}
 
-	// Activate the target placement
-	t.Placements[debridName].IsActive = true
 	t.ActiveDebrid = debridName
 	t.UpdatedAt = time.Now()
 
@@ -272,6 +282,33 @@ func (t *Torrent) GetActiveFiles() []*File {
 		}
 	}
 	return files
+}
+func (t *Torrent) GetFolder() string {
+	if t.Folder != "" {
+		return t.Folder
+	}
+	return GetTorrentFolder(config.Get().FolderNaming, t)
+}
+
+// IsValid checks if the torrent has essential fields
+func (t *Torrent) IsValid() bool {
+	// Check infohash
+	if t.InfoHash == "" || t.Name == "" {
+		return false
+	}
+	// Check if there is at least one placement
+	if t.Placements == nil || len(t.Placements) == 0 {
+		return false
+	}
+	activePlacement := t.GetActivePlacement()
+	if activePlacement == nil {
+		return false
+	}
+	// Check validity of active placement
+	if activePlacement.ID == "" || activePlacement.Debrid == "" {
+		return false
+	}
+	return activePlacement.IsValid()
 }
 
 // SwitcherJob tracks the progress of a migration operation
@@ -406,7 +443,6 @@ func (ct *CachedTorrent) ToManagedTorrent() *Torrent {
 			ID:           ct.ID,
 			AddedAt:      addedOn,
 			Status:       debridTypes.TorrentStatus(ct.Status),
-			IsActive:     true,
 			Progress:     ct.Progress,
 			DownloadedAt: downloadedAt,
 			Files:        make(map[string]*PlacementFile),
@@ -434,18 +470,21 @@ func (ct *CachedTorrent) ToManagedTorrent() *Torrent {
 
 // GetTorrentFolder returns the folder name for a torrent by debrid ID
 func GetTorrentFolder(folderNaming config.WebDavFolderNaming, torrent *Torrent) string {
+	var folder string
 	switch folderNaming {
 	case config.WebDavUseFileName:
-		return path.Clean(torrent.Name)
+		folder = path.Clean(torrent.Name)
 	case config.WebDavUseOriginalName:
-		return path.Clean(torrent.OriginalFilename)
+		folder = path.Clean(torrent.OriginalFilename)
 	case config.WebDavUseFileNameNoExt:
-		return path.Clean(utils.RemoveExtension(torrent.Name))
+		folder = path.Clean(utils.RemoveExtension(torrent.Name))
 	case config.WebDavUseOriginalNameNoExt:
-		return path.Clean(utils.RemoveExtension(torrent.OriginalFilename))
+		folder = path.Clean(utils.RemoveExtension(torrent.OriginalFilename))
 	case config.WebdavUseHash:
-		return strings.ToLower(torrent.InfoHash)
+		folder = torrent.InfoHash
 	default:
-		return path.Clean(torrent.Name)
+		folder = path.Clean(torrent.Name)
 	}
+	torrent.Folder = folder
+	return folder
 }

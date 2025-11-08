@@ -403,7 +403,7 @@ func (tb *Torbox) DeleteTorrent(torrentId string) error {
 	return nil
 }
 
-func (tb *Torbox) GetFileDownloadLinks(t *types.Torrent) error {
+func (tb *Torbox) GetFileDownloadLinks(t *types.Torrent) (map[string]types.DownloadLink, error) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var firstErr error
@@ -418,7 +418,7 @@ func (tb *Torbox) GetFileDownloadLinks(t *types.Torrent) error {
 		go func(file types.File) {
 			defer wg.Done()
 
-			link, err := tb.GetDownloadLink(t, &file)
+			link, err := tb.GetDownloadLink(t.Id, &file)
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -447,20 +447,20 @@ func (tb *Torbox) GetFileDownloadLinks(t *types.Torrent) error {
 	wg.Wait()
 
 	if firstErr != nil {
-		return firstErr
+		return nil, firstErr
 	}
 
 	// AddOrUpdate links to cache
 	t.Files = files
-	return nil
+	return links, nil
 }
 
-func (tb *Torbox) GetDownloadLink(t *types.Torrent, file *types.File) (types.DownloadLink, error) {
+func (tb *Torbox) GetDownloadLink(id string, file *types.File) (types.DownloadLink, error) {
 	url := "/api/torrents/requestdl/"
 	var data DownloadLinksResponse
 
 	resp, err := tb.client.R().
-		SetQueryParam("torrent_id", t.Id).
+		SetQueryParam("torrent_id", id).
 		SetQueryParam("token", tb.APIKey).
 		SetQueryParam("file_id", file.Id).
 		SetSuccessResult(&data).

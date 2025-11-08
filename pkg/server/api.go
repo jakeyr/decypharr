@@ -72,7 +72,7 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			importReq := manager.NewImportRequest(debridName, downloadFolder, magnet, _arr, action, downloadUncached, callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
+			importReq := manager.NewImportRequest(debridName, downloadFolder, magnet, _arr, config.DownloadAction(action), downloadUncached, callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
 			if err := s.manager.AddNewTorrent(ctx, importReq); err != nil {
 				s.logger.Error().Err(err).Str("url", url).Msg("Failed to add torrent")
 				errs = append(errs, fmt.Sprintf("URL %s: %v", url, err))
@@ -97,7 +97,7 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			importReq := manager.NewImportRequest(debridName, downloadFolder, magnet, _arr, action, downloadUncached, callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
+			importReq := manager.NewImportRequest(debridName, downloadFolder, magnet, _arr, config.DownloadAction(action), downloadUncached, callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
 			err = s.manager.AddNewTorrent(ctx, importReq)
 			if err != nil {
 				s.logger.Error().Err(err).Str("file", fileHeader.Filename).Msg("Failed to add torrent")

@@ -296,9 +296,7 @@ func (m *Manager) processTorrent(t *types.Torrent, cachedTorrents map[string]*st
 			CreatedAt:        addedOn,
 			UpdatedAt:        time.Now(),
 		}
-		if mt.Folder == "" {
-			mt.Folder = storage.GetTorrentFolder(m.config.FolderNaming, mt)
-		}
+		mt.Folder = mt.GetFolder()
 		cachedTorrents[t.InfoHash] = mt
 	}
 

@@ -6,9 +6,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
-	torrent2 "github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 // Multi-season detection patterns
@@ -52,20 +53,64 @@ type multiSeasonPattern struct {
 	replacement string
 }
 
-type seasonResult struct {
-	debridTorrent *debridTypes.Torrent
-	torrent       *torrent2.Torrent
-}
-
 // SeasonInfo represents information about a season in a multi-season torrent
 type SeasonInfo struct {
 	SeasonNumber int
-	Files        []debridTypes.File
+	Files        []*storage.File
 	InfoHash     string
 	Name         string
 }
 
-func (m *Manager) replaceMultiSeasonPattern(name string, targetSeason int) string {
+// convertToMultiSeason converts a normal torrent to a multi-season torrents
+func convertToMultiSeason(torrent *storage.Torrent, seasons []SeasonInfo) []*storage.Torrent {
+	seasonResults := make([]*storage.Torrent, 0, len(seasons))
+	for _, seasonInfo := range seasons {
+		// Filter files to only include this season's files
+		seasonFiles := make(map[string]*storage.File)
+		size := int64(0)
+		for _, file := range seasonInfo.Files {
+			seasonFiles[file.Name] = &storage.File{
+				Name:      file.Name,
+				Size:      file.Size,
+				ByteRange: file.ByteRange,
+				Deleted:   file.Deleted,
+				IsRar:     file.IsRar,
+			}
+			size += file.Size
+		}
+
+		// Create a season-specific managed torrent
+		seasonTorrent := &storage.Torrent{
+			InfoHash:         seasonInfo.InfoHash,
+			Name:             seasonInfo.Name,
+			OriginalFilename: torrent.OriginalFilename,
+			Size:             size,
+			Bytes:            size,
+			Magnet:           torrent.Magnet,
+			Category:         torrent.Category,
+			SavePath:         torrent.SavePath,
+			Folder:           torrent.Folder,
+			Status:           debridTypes.TorrentStatusDownloading,
+			ActiveDebrid:     torrent.ActiveDebrid,
+			Action:           torrent.Action,
+			CreatedAt:        time.Now(),
+			UpdatedAt:        time.Now(),
+			AddedOn:          time.Now(),
+			Placements:       make(map[string]*storage.Placement),
+			Files:            seasonFiles,
+		}
+
+		// Copy placement
+		for debridName, placement := range torrent.Placements {
+			seasonTorrent.Placements[debridName] = placement
+		}
+		seasonResults = append(seasonResults, seasonTorrent)
+	}
+	return seasonResults
+
+}
+
+func replaceMultiSeasonPattern(name string, targetSeason int) string {
 	result := name
 
 	// Apply each pre-compiled pattern replacement
@@ -73,16 +118,15 @@ func (m *Manager) replaceMultiSeasonPattern(name string, targetSeason int) strin
 		if msp.pattern.MatchString(result) {
 			replacement := fmt.Sprintf(msp.replacement, targetSeason)
 			result = msp.pattern.ReplaceAllString(result, replacement)
-			m.logger.Debug().Msgf("Applied pattern replacement: %s -> %s", name, result)
 			return result
 		}
 	}
 
 	// If no multi-season pattern found, try to insert season info intelligently
-	return m.insertSeasonIntoName(result, targetSeason)
+	return insertSeasonIntoName(result, targetSeason)
 }
 
-func (m *Manager) insertSeasonIntoName(name string, seasonNum int) string {
+func insertSeasonIntoName(name string, seasonNum int) string {
 	// Check if season info already exists
 	if seasonPattern.MatchString(name) {
 		return name // Already has season info, keep as is
@@ -100,70 +144,18 @@ func (m *Manager) insertSeasonIntoName(name string, seasonNum int) string {
 	return fmt.Sprintf("%s S%02d", name, seasonNum)
 }
 
-func (m *Manager) detectMultiSeason(debridTorrent *debridTypes.Torrent) (bool, []SeasonInfo, error) {
-	torrentName := debridTorrent.Name
-	files := debridTorrent.GetFiles()
-
-	m.logger.Debug().Msgf("Analyzing torrent for multi-season: %s", torrentName)
-
-	// Find all seasons present in the files
-	seasonsFound := m.findAllSeasons(files)
-
-	// Check if this is actually a multi-season torrent
-	isMultiSeason := len(seasonsFound) > 1 || m.hasMultiSeasonIndicators(torrentName)
-
-	if !isMultiSeason {
-		return false, nil, nil
-	}
-
-	m.logger.Info().Msgf("Multi-season torrent detected with seasons: %v", getSortedSeasons(seasonsFound))
-
-	// Group files by season
-	seasonGroups := m.groupFilesBySeason(files, seasonsFound)
-
-	// Create SeasonInfo objects with proper naming
-	var seasons []SeasonInfo
-	for seasonNum, seasonFiles := range seasonGroups {
-		if len(seasonFiles) == 0 {
-			continue
-		}
-
-		// Generate season-specific name preserving all metadata
-		seasonName := m.generateSeasonSpecificName(torrentName, seasonNum)
-
-		seasons = append(seasons, SeasonInfo{
-			SeasonNumber: seasonNum,
-			Files:        seasonFiles,
-			InfoHash:     m.generateSeasonHash(debridTorrent.InfoHash, seasonNum),
-			Name:         seasonName,
-		})
-	}
-
-	return true, seasons, nil
-}
-
-// generateSeasonSpecificName creates season name preserving all original metadata
-func (m *Manager) generateSeasonSpecificName(originalName string, seasonNum int) string {
-	// Find and replace the multi-season pattern with single season
-	seasonName := m.replaceMultiSeasonPattern(originalName, seasonNum)
-
-	m.logger.Debug().Msgf("Generated season name for S%02d: %s", seasonNum, seasonName)
-
-	return seasonName
-}
-
-func (m *Manager) findAllSeasons(files []debridTypes.File) map[int]bool {
+func findAllSeasons(files []*storage.File) map[int]bool {
 	seasons := make(map[int]bool)
 
 	for _, file := range files {
 		// Check filename first
-		if season := m.extractSeason(file.Name); season > 0 {
+		if season := extractSeason(file.Name); season > 0 {
 			seasons[season] = true
 			continue
 		}
 
 		// Check full path
-		if season := m.extractSeason(file.Path); season > 0 {
+		if season := extractSeason(file.Path); season > 0 {
 			seasons[season] = true
 		}
 	}
@@ -172,7 +164,7 @@ func (m *Manager) findAllSeasons(files []debridTypes.File) map[int]bool {
 }
 
 // extractSeason pulls season number from a string
-func (m *Manager) extractSeason(text string) int {
+func extractSeason(text string) int {
 	matches := seasonPattern.FindStringSubmatch(text)
 	if len(matches) > 1 {
 		if num, err := strconv.Atoi(matches[1]); err == nil && num > 0 && num < 100 {
@@ -182,7 +174,7 @@ func (m *Manager) extractSeason(text string) int {
 	return 0
 }
 
-func (m *Manager) hasMultiSeasonIndicators(torrentName string) bool {
+func hasMultiSeasonIndicators(torrentName string) bool {
 	for _, pattern := range multiSeasonIndicators {
 		if pattern.MatchString(torrentName) {
 			return true
@@ -192,19 +184,19 @@ func (m *Manager) hasMultiSeasonIndicators(torrentName string) bool {
 }
 
 // groupFilesBySeason puts files into season buckets
-func (m *Manager) groupFilesBySeason(files []debridTypes.File, knownSeasons map[int]bool) map[int][]debridTypes.File {
-	groups := make(map[int][]debridTypes.File)
+func groupFilesBySeason(files []*storage.File, knownSeasons map[int]bool) map[int][]*storage.File {
+	groups := make(map[int][]*storage.File)
 
 	// Initialize groups
 	for season := range knownSeasons {
-		groups[season] = []debridTypes.File{}
+		groups[season] = []*storage.File{}
 	}
 
 	for _, file := range files {
 		// Try to find season from filename or path
-		season := m.extractSeason(file.Name)
+		season := extractSeason(file.Name)
 		if season == 0 {
-			season = m.extractSeason(file.Path)
+			season = extractSeason(file.Path)
 		}
 
 		// If we found a season and it's known, add the file
@@ -212,7 +204,7 @@ func (m *Manager) groupFilesBySeason(files []debridTypes.File, knownSeasons map[
 			groups[season] = append(groups[season], file)
 		} else {
 			// If no season found, try path-based inference
-			inferredSeason := m.inferSeasonFromPath(file.Path, knownSeasons)
+			inferredSeason := inferSeasonFromPath(file.Path, knownSeasons)
 			if inferredSeason > 0 {
 				groups[inferredSeason] = append(groups[inferredSeason], file)
 			} else if len(knownSeasons) == 1 {
@@ -227,11 +219,11 @@ func (m *Manager) groupFilesBySeason(files []debridTypes.File, knownSeasons map[
 	return groups
 }
 
-func (m *Manager) inferSeasonFromPath(path string, knownSeasons map[int]bool) int {
+func inferSeasonFromPath(path string, knownSeasons map[int]bool) int {
 	pathParts := strings.Split(path, "/")
 
 	for _, part := range pathParts {
-		if season := m.extractSeason(part); season > 0 && knownSeasons[season] {
+		if season := extractSeason(part); season > 0 && knownSeasons[season] {
 			return season
 		}
 	}
@@ -249,8 +241,8 @@ func getSortedSeasons(seasons map[int]bool) []int {
 }
 
 // generateSeasonHash creates a unique hash for a season based on original hash
-func (m *Manager) generateSeasonHash(originalHash string, seasonNumber int) string {
-	source := fmt.Sprintf("%s-season-%d", originalHash, seasonNumber)
+func generateSeasonHash(originalHash string, seasonNumber int) string {
+	source := fmt.Sprintf("%s-%d", originalHash, seasonNumber)
 	hash := md5.Sum([]byte(source))
 	return fmt.Sprintf("%x", hash)
 }

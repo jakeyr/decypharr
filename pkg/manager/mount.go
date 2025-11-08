@@ -60,3 +60,27 @@ func NewEventHandlers(mounter Mount) *Event {
 		OnRefresh: mounter.Refresh,
 	}
 }
+
+type stubMountManager struct{}
+
+func NewStubMountManager() MountManager {
+	return &stubMountManager{}
+}
+
+func (s *stubMountManager) Start(ctx context.Context) error {
+	return nil
+}
+func (s *stubMountManager) Stop() error {
+	return nil
+}
+func (s *stubMountManager) Stats() map[string]interface{} {
+	return map[string]interface{}{
+		"message": "no mount configured",
+	}
+}
+func (s *stubMountManager) IsReady() bool {
+	return false
+}
+func (s *stubMountManager) Type() string {
+	return "none"
+}

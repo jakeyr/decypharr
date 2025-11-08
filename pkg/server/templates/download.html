@@ -57,6 +57,7 @@
                         </label>
                         <select class="select w-full" id="downloadAction" name="downloadAction">
                             <option value="symlink" selected>Create Symlink</option>
+                            <option value="strm" selected>Create STRM Files</option>
                             <option value="download">Download Files</option>
                             <option value="none">No Action</option>
                         </select>
@@ -93,8 +94,9 @@
                             <span>Debrid Service</span>
                         </label>
                         <select class="select w-full" id="debrid" name="debrid">
+                            <option value="" selected>Auto(Try all available)</option>
                             {{ range $index, $debrid := .Debrids }}
-                            <option value="{{ $debrid }}" {{ if eq $index 0 }}selected{{end}}>
+                            <option value="{{ $debrid }}">
                                 {{ $debrid }}
                             </option>
                             {{ end }}
@@ -102,6 +104,9 @@
                             <span class="text-sm opacity-70">Choose which debrid service to use</span>
                     </div>
                     {{ end }}
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 space-y-4">
                     <div>
                         <label class="label cursor-pointer justify-start gap-3">
                             <input type="checkbox" class="checkbox checkbox-primary" name="downloadUncached" id="downloadUncached">

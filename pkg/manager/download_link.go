@@ -13,18 +13,17 @@ import (
 
 // GetDownloadLink gets or fetches a download link for a file
 func (m *Manager) GetDownloadLink(torrent *storage.Torrent, filename string) (types.DownloadLink, error) {
-
 	// Get the file
 	file, ok := torrent.Files[filename]
 	if !ok {
-		return types.DownloadLink{}, fmt.Errorf("file %s not found in torrent %s", filename, torrent.Folder)
+		return types.DownloadLink{}, fmt.Errorf("file %s not found in torrent %s", filename, torrent.GetFolder())
 	}
 
 	// Use active debrid if not specified
 	debridName := torrent.ActiveDebrid
 
 	if debridName == "" {
-		return types.DownloadLink{}, fmt.Errorf("no active debrid for torrent %s", torrent.Folder)
+		return types.DownloadLink{}, fmt.Errorf("no active debrid for torrent %s", torrent.GetFolder())
 	}
 
 	// Get placement and placement file
@@ -36,10 +35,7 @@ func (m *Manager) GetDownloadLink(torrent *storage.Torrent, filename string) (ty
 	// Use the file link/id as the cache key
 	fileLink := placementFile.Link
 	if fileLink == "" {
-		fileLink = placementFile.Id
-	}
-	if fileLink == "" {
-		return types.DownloadLink{}, fmt.Errorf("file link/id is empty for %s in torrent %s", filename, torrent.Folder)
+		return types.DownloadLink{}, fmt.Errorf("file link is empty for %s in torrent %s", filename, torrent.Folder)
 	}
 
 	// Check failure counter
@@ -133,16 +129,8 @@ func (m *Manager) fetchDownloadLink(torrent *storage.Torrent, file *storage.File
 		Deleted:   file.Deleted,
 	}
 
-	// Build debrid torrent for GetDownloadLink call
-	debridTorrent := &types.Torrent{
-		Id:       placement.ID,
-		InfoHash: torrent.InfoHash,
-		Name:     torrent.Name,
-		Debrid:   debridName,
-	}
-
 	m.logger.Trace().Msgf("Getting download link for %s(%s)", file.Name, placementFile.Link)
-	downloadLink, err := client.GetDownloadLink(debridTorrent, &debridFile)
+	downloadLink, err := client.GetDownloadLink(placement.ID, &debridFile)
 	if err != nil {
 		if errors.Is(err, utils.HosterUnavailableError) {
 			// Hoster unavailable - trigger repair
@@ -204,19 +192,19 @@ func (m *Manager) checkDownloadLink(link string, debridName string) (types.Downl
 }
 
 // GetFileDownloadLinks generates download links for all files in a torrent
-func (m *Manager) GetFileDownloadLinks(torrent *storage.Torrent) error {
+func (m *Manager) GetFileDownloadLinks(torrent *storage.Torrent) (map[string]types.DownloadLink, error) {
 	if torrent.ActiveDebrid == "" {
-		return fmt.Errorf("no active debrid for torrent")
+		return nil, fmt.Errorf("no active debrid for torrent")
 	}
 
 	client := m.DebridClient(torrent.ActiveDebrid)
 	if client == nil {
-		return fmt.Errorf("debrid client not found: %s", torrent.ActiveDebrid)
+		return nil, fmt.Errorf("debrid client not found: %s", torrent.ActiveDebrid)
 	}
 
 	placement := torrent.GetActivePlacement()
 	if placement == nil {
-		return fmt.Errorf("no active placement found")
+		return nil, fmt.Errorf("no active placement found")
 	}
 
 	// Build debrid torrent
@@ -227,11 +215,7 @@ func (m *Manager) GetFileDownloadLinks(torrent *storage.Torrent) error {
 		Debrid:   torrent.ActiveDebrid,
 	}
 
-	if err := client.GetFileDownloadLinks(debridTorrent); err != nil {
-		return fmt.Errorf("failed to generate download links: %w", err)
-	}
-
-	return nil
+	return client.GetFileDownloadLinks(debridTorrent)
 }
 
 // IncrementFailedLinkCounter increments the failure counter for a link

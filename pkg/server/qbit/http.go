@@ -105,10 +105,12 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	action := "symlink"
+	cfg := config.Get()
+	action := cfg.DefaultDownloadAction
 	if strings.ToLower(r.FormValue("sequentialDownload")) == "true" {
-		action = "download"
+		action = config.DownloadActionDownload
 	}
+
 	rmTrackerUrls := strings.ToLower(r.FormValue("firstLastPiecePrio")) == "true"
 
 	// Check config setting - if always remove tracker URLs is enabled, force it to true

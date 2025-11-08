@@ -1,6 +1,7 @@
 package webdav
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -64,9 +65,8 @@ func (h *Handler) Routes() chi.Router {
 	r.HandleFunc("/{mount}", h.handleMount)
 	r.HandleFunc("/{mount}/{group}", h.handleGroup)
 	r.HandleFunc("/{mount}/{group}/{torrent}", h.handleTorrentFolder)
-
 	r.HandleFunc("/{mount}/{group}/{torrent}/{file}", h.handleTorrentFile)
-
+	r.HandleFunc("/stream/{group}/{torrent}/{file}", h.handleTorrentFile)
 	return r
 }
 
@@ -75,6 +75,10 @@ func (h *Handler) handler(current *manager.FileInfo, children []manager.FileInfo
 	case "HEAD":
 		h.handleHead(current, w, r)
 	case "GET":
+		if current == nil {
+			http.Error(w, "Not Found", http.StatusNotFound)
+			return
+		}
 		h.handleGet(current, w, r)
 	case "DELETE":
 		h.handleDelete(current, w, r)
@@ -114,6 +118,7 @@ func (h *Handler) handleGroup(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleTorrentFolder(w http.ResponseWriter, r *http.Request) {
 	torrent := utils.PathUnescape(chi.URLParam(r, "torrent"))
+	fmt.Println("Handling torrent folder: ", torrent)
 
 	currentInfo, children := h.manager.GetTorrentChildren(torrent)
 	h.handler(currentInfo, children, w, r)
@@ -122,7 +127,6 @@ func (h *Handler) handleTorrentFolder(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleTorrentFile(w http.ResponseWriter, r *http.Request) {
 	torrent := utils.PathUnescape(chi.URLParam(r, "torrent"))
 	file := utils.PathUnescape(chi.URLParam(r, "file"))
-
 	currentInfo, err := h.manager.GetTorrentFile(torrent, file)
 	if err != nil || currentInfo == nil {
 		http.Error(w, "File not found", http.StatusNotFound)

@@ -174,7 +174,7 @@ func (r *RealDebrid) handleRarArchive(t *types.Torrent, data torrentInfo, select
 
 	r.logger.Info().Msgf("RAR file detected, unpacking: %s", t.Name)
 	linkFile := &types.File{TorrentId: t.Id, Link: data.Links[0]}
-	downloadLinkObj, err := r.GetDownloadLink(t, linkFile)
+	downloadLinkObj, err := r.GetDownloadLink(t.Id, linkFile)
 
 	if err != nil {
 		r.logger.Debug().Err(err).Msgf("Error getting download link for RAR file: %s. Falling back to single file representation.", t.Name)
@@ -583,7 +583,7 @@ func (r *RealDebrid) DeleteTorrent(torrentId string) error {
 	return nil
 }
 
-func (r *RealDebrid) GetFileDownloadLinks(t *types.Torrent) error {
+func (r *RealDebrid) GetFileDownloadLinks(t *types.Torrent) (map[string]types.DownloadLink, error) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var firstErr error
@@ -598,7 +598,7 @@ func (r *RealDebrid) GetFileDownloadLinks(t *types.Torrent) error {
 		go func(file types.File) {
 			defer wg.Done()
 
-			link, err := r.GetDownloadLink(t, &file)
+			link, err := r.GetDownloadLink(t.Id, &file)
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -619,7 +619,7 @@ func (r *RealDebrid) GetFileDownloadLinks(t *types.Torrent) error {
 			file.DownloadLink = link
 			mu.Lock()
 			files[file.Name] = file
-			links[link.Link] = link
+			links[file.Name] = link
 			mu.Unlock()
 		}(f)
 	}
@@ -627,12 +627,12 @@ func (r *RealDebrid) GetFileDownloadLinks(t *types.Torrent) error {
 	wg.Wait()
 
 	if firstErr != nil {
-		return firstErr
+		return nil, firstErr
 	}
 
 	// AddOrUpdate links to cache
 	t.Files = files
-	return nil
+	return links, nil
 }
 
 func (r *RealDebrid) CheckLink(link string) error {
@@ -702,7 +702,7 @@ func (r *RealDebrid) getDownloadLink(account *account.Account, file *types.File)
 	return dl, nil
 }
 
-func (r *RealDebrid) GetDownloadLink(t *types.Torrent, file *types.File) (types.DownloadLink, error) {
+func (r *RealDebrid) GetDownloadLink(id string, file *types.File) (types.DownloadLink, error) {
 	accounts := r.accountsManager.Active()
 	for _, _account := range accounts {
 		downloadLink, err := r.getDownloadLink(_account, file)

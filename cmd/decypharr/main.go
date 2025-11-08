@@ -80,6 +80,8 @@ func Start(ctx context.Context) error {
 		srv.SetRestartFunc(restartFunc)
 
 		resetFunc := func() {
+
+			config.Reset()
 			// Reset the store and services
 			qb.Reset()
 			// Stop manager to reset ready channel and cleanup resources
@@ -126,9 +128,10 @@ func createMountManager(mgr *manager.Manager, cfg *config.Config) manager.MountM
 		return rclone.NewManager(mgr)
 	case config.MountTypeDFS:
 		return dfs.NewManager(mgr)
-	default:
+	case config.MountTypeExternalRclone:
 		return external.NewManager(mgr)
-
+	default:
+		return manager.NewStubMountManager()
 	}
 }
 
