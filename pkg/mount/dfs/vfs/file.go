@@ -60,7 +60,9 @@ type File struct {
 	// Stats and lifecycle
 	stats           *StatsTracker
 	manager         *manager.Manager // Reference to save metadata
+	vfsManager      *Manager         // Reference to VFS manager for Lightning access
 	lastAccess      time.Time
+	lastReadOffset  atomic.Int64 // Track last read offset for sequential detection
 	modTime         time.Time
 	dirty           bool // Has unflushed changes to metadata
 	bytesDownloaded atomic.Int64
@@ -73,7 +75,7 @@ type File struct {
 }
 
 // newFile creates or opens a cached file with download capabilities
-func newFile(cacheDir string, info *manager.FileInfo, chunkSize, readAhead int64, stats *StatsTracker, manager *manager.Manager) (*File, error) {
+func newFile(cacheDir string, info *manager.FileInfo, chunkSize, readAhead int64, stats *StatsTracker, manager *manager.Manager, vfsManager *Manager) (*File, error) {
 	sanitizedFileName := sanitizeForPath(info.Name())
 	torrentDir := filepath.Join(cacheDir, sanitizeForPath(info.Parent()))
 	cachePath := filepath.Join(torrentDir, sanitizedFileName)
@@ -105,11 +107,15 @@ func newFile(cacheDir string, info *manager.FileInfo, chunkSize, readAhead int64
 		downloading: xsync.NewMap[int64, *downloadJob](),
 		stats:       stats,
 		manager:     manager,
+		vfsManager:  vfsManager,
 		lastAccess:  time.Now(),
 		modTime:     time.Now(),
 		dirty:       false,
 		closeChan:   make(chan struct{}),
 	}
+
+	// Initialize last read offset to -1 (no previous read)
+	f.lastReadOffset.Store(-1)
 
 	return f, nil
 }
@@ -396,8 +402,8 @@ func (f *File) IsCached(offset, length int64) bool {
 // ============================================================================
 
 // ReadAt reads data with progressive download for instant playback start
-// Downloads minimum threshold (512KB) then returns immediately while continuing in background
-// This enables playback to start in ~0.1-0.3 seconds instead of waiting for full 8MB chunk
+// Uses ring buffer streaming for large sequential reads (instant playback)
+// Falls back to chunk-based caching for random/small reads
 func (f *File) ReadAt(ctx context.Context, p []byte, offset int64) (int, error) {
 	size := f.info.Size()
 	if offset >= size {
@@ -410,24 +416,53 @@ func (f *File) ReadAt(ctx context.Context, p []byte, offset int64) (int, error) 
 		p = p[:readSize]
 	}
 
+	// Try Lightning streaming first (if enabled and configured)
+	if f.vfsManager != nil {
+		n, usedLightning, err := f.vfsManager.TryLightningRead(ctx, f.info, p, offset)
+		if usedLightning {
+			// Lightning successfully handled the read
+			if err == nil {
+				f.lastReadOffset.Store(offset + int64(n))
+			}
+			return n, err
+		}
+		// Lightning not available or failed - fall through to traditional method
+	}
+
 	// Check if fully cached (zero-allocation check)
 	if f.IsCached(offset, readSize) {
 		// Cache hit - read and trigger prefetch
 		n, _, err := f.readAt(p, offset)
 		if err == nil {
+			// Update last read offset for sequential detection
+			f.lastReadOffset.Store(offset + int64(n))
 			go f.aggressiveSequentialPrefetch(ctx, offset+readSize)
 		}
 		return n, err
 	}
 
 	// Cache miss - need to download
-	// Calculate which chunks we need
-	startChunk := offset / f.chunkSize
-	endChunk := (offset + readSize - 1) / f.chunkSize
-
 	// Track active read
 	f.stats.TrackActiveRead(1)
 	defer f.stats.TrackActiveRead(-1)
+
+	// OPTIMIZATION: Use streaming mode for large sequential reads (video playback)
+	// This provides instant playback startup similar to WebDAV ring buffer
+	// Streaming bypasses disk I/O and delivers data directly to client
+	if shouldUseStreaming(offset, readSize, &f.lastReadOffset) {
+		// Use ring buffer streaming for instant playback
+		n, err := f.streamingReadAt(ctx, p, offset)
+		if err == nil {
+			// Update last read offset for sequential detection
+			f.lastReadOffset.Store(offset + int64(n))
+		}
+		return n, err
+	}
+
+	// FALLBACK: Use chunk-based caching for random/small reads
+	// Calculate which chunks we need
+	startChunk := offset / f.chunkSize
+	endChunk := (offset + readSize - 1) / f.chunkSize
 
 	// Progressive download: Calculate minimum threshold for instant playback
 	// Use 512KB as minimum - enough for video player to start, small enough to download fast
@@ -469,6 +504,8 @@ func (f *File) ReadAt(ctx context.Context, p []byte, offset int64) (int, error) 
 
 	// If we got data, return it (even if partial)
 	if n > 0 {
+		// Update last read offset for sequential detection
+		f.lastReadOffset.Store(offset + int64(n))
 		return n, nil
 	}
 

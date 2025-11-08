@@ -90,6 +90,9 @@ type Manager struct {
 	// Cached directory size (updated during cleanup)
 	cachedDirSize atomic.Int64
 	lastSizeCheck atomic.Int64 // Unix timestamp
+
+	// Lightning streaming integration
+	lightning *LightningIntegration
 }
 
 // NewManager creates a file manager
@@ -107,6 +110,13 @@ func NewManager(manager *manager.Manager, fuseConfig *config.FuseConfig) *Manage
 		stats:             statsTracker,
 		fileAccessTracker: xsync.NewMap[string, *FileAccessInfo](),
 	}
+
+	// Initialize Lightning integration
+	if lightning, err := NewLightningIntegration(manager, fuseConfig); err == nil {
+		m.lightning = lightning
+	}
+	// If Lightning fails to initialize, m.lightning will be nil and we'll fall back to traditional method
+
 	go m.closeIdleFilesLoop()
 	go m.Cleanup(ctx)
 
@@ -160,7 +170,7 @@ func (m *Manager) CreateReader(info *manager.FileInfo) (*File, error) {
 		readAhead = chunkSize * 2 // Minimum 2 chunks ahead for smooth playback
 	}
 
-	f, err := newFile(m.config.CacheDir, info, chunkSize, readAhead, m.stats, m.manager)
+	f, err := newFile(m.config.CacheDir, info, chunkSize, readAhead, m.stats, m.manager, m)
 	if err != nil {
 		return nil, err
 	}
@@ -181,6 +191,11 @@ func (m *Manager) CreateReader(info *manager.FileInfo) (*File, error) {
 // Close closes all files
 func (m *Manager) Close() error {
 	m.closeCancel()
+
+	// Close Lightning integration
+	if m.lightning != nil {
+		_ = m.lightning.Close()
+	}
 
 	// Close all files
 	m.files.Range(func(key string, f *File) bool {
@@ -474,7 +489,21 @@ func (m *Manager) GetStats() map[string]interface{} {
 		"buffer_size":     m.config.BufferSize,
 	}
 
+	// Add Lightning stats if enabled
+	if m.lightning != nil {
+		stats["lightning"] = m.lightning.GetStats()
+	}
+
 	return stats
+}
+
+// TryLightningRead attempts to use Lightning for reading, returns (n, usedLightning, error)
+func (m *Manager) TryLightningRead(ctx context.Context, fileInfo *manager.FileInfo, p []byte, offset int64) (int, bool, error) {
+	if m.lightning == nil || !m.lightning.IsEnabled() {
+		return 0, false, nil
+	}
+
+	return m.lightning.ReadAt(ctx, fileInfo, p, offset)
 }
 
 // === Utility Functions ===
