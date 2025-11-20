@@ -32,7 +32,6 @@ type FuseConfig struct {
 	UID                uint32
 	GID                uint32
 	Umask              uint32
-	AsyncRead          bool
 	AllowOther         bool
 	DefaultPermissions bool
 
@@ -40,9 +39,6 @@ type FuseConfig struct {
 	AttrTimeout     time.Duration
 	EntryTimeout    time.Duration
 	NegativeTimeout time.Duration
-
-	// Health and monitoring
-	StatsInterval time.Duration
 }
 
 // DefaultFuseConfig returns a streaming-optimized default configuration
@@ -53,7 +49,6 @@ func DefaultFuseConfig() *FuseConfig {
 		DaemonTimeout:        time.Second * 10, // Longer timeout for reliability
 		CacheExpiry:          24 * time.Hour,   // Longer cache for popular content
 		CacheCleanupInterval: 5 * time.Minute,  // More frequent cleanup
-		AsyncRead:            true,
 
 		// File system defaults
 		UID:                1000,
@@ -66,9 +61,6 @@ func DefaultFuseConfig() *FuseConfig {
 		AttrTimeout:     30 * time.Second, // Longer attribute caching
 		EntryTimeout:    30 * time.Second, // Longer entry caching
 		NegativeTimeout: 5 * time.Second,  // Short negative cache
-
-		// Health defaults
-		StatsInterval: 1 * time.Minute, // More frequent stats for monitoring
 	}
 }
 

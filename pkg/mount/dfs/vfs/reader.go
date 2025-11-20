@@ -30,23 +30,43 @@ type Reader struct {
 	cache     *Cache
 	cacheFile *CacheFile
 
+	// In-memory ring buffer for fast sequential reads
+	ringBuffer *RingBuffer
+
+	// Sequential detection
+	lastOffset    atomic.Int64
+	lastSize      atomic.Int64
+	sequentialCnt atomic.Int32
+
+	// Async read-ahead
+	readAheadCh   chan readAheadRequest
+	readAheadStop chan struct{}
+
 	// Download synchronization
 	downloads       *xsync.Map[int64, *downloadOperation]
 	activeDownloads atomic.Int32 // Count of active downloads
 
 	// Statistics
 	stats struct {
-		reads        atomic.Int64
-		cacheHits    atomic.Int64
-		cacheMisses  atomic.Int64
-		downloads    atomic.Int64
-		bytesRead    atomic.Int64
-		bytesWritten atomic.Int64
+		reads          atomic.Int64
+		cacheHits      atomic.Int64
+		cacheMisses    atomic.Int64
+		downloads      atomic.Int64
+		bytesRead      atomic.Int64
+		bytesWritten   atomic.Int64
+		ringBufferHits atomic.Int64
+		readAheadOps   atomic.Int64
 	}
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	closed atomic.Bool
+}
+
+// readAheadRequest represents an async read-ahead request
+type readAheadRequest struct {
+	offset int64
+	size   int64
 }
 
 // downloadOperation tracks a single download operation with better coordination
@@ -59,14 +79,19 @@ type downloadOperation struct {
 }
 
 // NewReader creates a reader with sharded caching
+// If cache is nil, reader operates in direct-streaming mode (no disk caching)
 func NewReader(ctx context.Context, mgr *manager.Manager, info *manager.FileInfo, cache *Cache, cfg *common.FuseConfig) (*Reader, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	torrentName, filename, fileSize := info.Parent(), info.Name(), info.Size()
 
-	cf, err := cache.GetOrCreate(torrentName, filename, fileSize)
-	if err != nil {
-		cancel()
-		return nil, err
+	var cf *CacheFile
+	if cache != nil {
+		var err error
+		cf, err = cache.GetOrCreate(torrentName, filename, fileSize)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
 	}
 
 	// Set defaults if not configured
@@ -99,20 +124,31 @@ func NewReader(ctx context.Context, mgr *manager.Manager, info *manager.FileInfo
 		bufferSize:    bufferSize,
 		readAhead:     readAhead,
 		maxConcurrent: maxConcurrent,
-		cache:         cache,
-		cacheFile:     cf,
+		cache:         cache,     // Can be nil for direct streaming
+		cacheFile:     cf,        // Can be nil for direct streaming
+		ringBuffer:    NewRingBuffer(bufferSize), // In-memory buffer sized to bufferSize
+		readAheadCh:   make(chan readAheadRequest, 4),
+		readAheadStop: make(chan struct{}),
 		downloads:     xsync.NewMap[int64, *downloadOperation](),
 		ctx:           ctx,
 		cancel:        cancel,
 	}
+
+	// Start async read-ahead worker (only useful when caching is enabled)
+	if cache != nil {
+		go r.readAheadWorker()
+	}
+
 	return r, nil
 }
 
 // ReadAt reads data at offset (FUSE callback)
 // Optimized algorithm with sharded caching:
-// 1. Fast lockless cache check using sharded ranges
-// 2. If miss, download with optimal chunking and read-ahead
-// 3. Use concurrent downloads for large requests
+// 1. Check in-memory ring buffer (fastest)
+// 2. Check disk cache
+// 3. Download missing data
+// 4. Trigger async read-ahead for sequential reads
+// When cache is nil, streams directly from source
 func (r *Reader) ReadAt(p []byte, offset int64) (int, error) {
 	if r.closed.Load() {
 		return 0, io.ErrClosedPipe
@@ -131,17 +167,37 @@ func (r *Reader) ReadAt(p []byte, offset int64) (int, error) {
 	r.stats.reads.Add(1)
 	r.stats.bytesRead.Add(readSize)
 
-	// Try to read from cache first (fast lockless path)
+	// Update sequential detection
+	isSequential := r.updateSequentialDetection(offset, readSize)
+
+	// Try ring buffer first (fastest path for sequential reads)
+	if n, ok := r.ringBuffer.ReadAt(p, offset); ok {
+		r.stats.ringBufferHits.Add(1)
+		if r.cache != nil {
+			r.triggerAsyncReadAhead(offset, readSize, isSequential)
+		}
+		return n, nil
+	}
+
+	// Direct streaming mode (no disk cache)
+	if r.cache == nil {
+		return r.readDirectFromSource(p, offset, readSize)
+	}
+
+	// Try disk cache (fast lockless path)
 	n, cached, err := r.cache.ReadAt(r.cacheFile, p, offset)
 	if cached && err == nil && int64(n) == readSize {
 		r.stats.cacheHits.Add(1)
+		// Also fill ring buffer for future sequential reads
+		r.ringBuffer.Write(p[:n], offset)
+		r.triggerAsyncReadAhead(offset, readSize, isSequential)
 		return n, nil
 	}
 
 	r.stats.cacheMisses.Add(1)
 
-	// Calculate range to download with read-ahead and chunk alignment
-	downloadStart, downloadSize := r.calculateDownloadRange(offset, readSize)
+	// Calculate range to download (just the requested data, no inline read-ahead)
+	downloadStart, downloadSize := r.calculateDownloadRange(offset, readSize, false)
 
 	// Download the missing range
 	if err := r.downloadRange(downloadStart, downloadSize); err != nil {
@@ -157,14 +213,147 @@ func (r *Reader) ReadAt(p []byte, offset int64) (int, error) {
 		return 0, fmt.Errorf("cache read failed: data not present after download")
 	}
 
+	// Fill ring buffer and trigger async read-ahead
+	r.ringBuffer.Write(p[:n], offset)
+	r.triggerAsyncReadAhead(offset, readSize, isSequential)
+
 	return n, nil
 }
 
-// calculateDownloadRange determines optimal download range with chunking and read-ahead
-func (r *Reader) calculateDownloadRange(offset, size int64) (start, downloadSize int64) {
-	// Calculate end with read-ahead
+// readDirectFromSource streams data directly from source without disk caching
+func (r *Reader) readDirectFromSource(p []byte, offset, readSize int64) (int, error) {
+	r.stats.cacheMisses.Add(1)
+	r.stats.downloads.Add(1)
+
+	endOffset := offset + readSize - 1
+	rc, err := r.manager.StreamReader(r.ctx, r.torrentName, r.filename, offset, endOffset)
+	if err != nil {
+		return 0, fmt.Errorf("http get [%d-%d]: %w", offset, endOffset, err)
+	}
+	defer func(rc io.ReadCloser) {
+		_ = rc.Close()
+	}(rc)
+
+	// Read directly into the provided buffer
+	totalRead := 0
+	for totalRead < len(p) {
+		select {
+		case <-r.ctx.Done():
+			return totalRead, r.ctx.Err()
+		default:
+		}
+
+		n, readErr := rc.Read(p[totalRead:])
+		if n > 0 {
+			totalRead += n
+			r.stats.bytesWritten.Add(int64(n))
+		}
+
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return totalRead, fmt.Errorf("read error at %d: %w", offset+int64(totalRead), readErr)
+		}
+	}
+
+	// Fill ring buffer for future sequential reads
+	if totalRead > 0 {
+		r.ringBuffer.Write(p[:totalRead], offset)
+	}
+
+	return totalRead, nil
+}
+
+// updateSequentialDetection tracks read patterns and returns true if sequential
+func (r *Reader) updateSequentialDetection(offset, size int64) bool {
+	lastOff := r.lastOffset.Load()
+	lastSz := r.lastSize.Load()
+
+	// Update last read info
+	r.lastOffset.Store(offset)
+	r.lastSize.Store(size)
+
+	// Check if this read follows the previous one
+	expectedOffset := lastOff + lastSz
+	if offset == expectedOffset || offset == lastOff {
+		cnt := r.sequentialCnt.Add(1)
+		return cnt >= 3 // Threshold for sequential mode
+	}
+
+	// Non-sequential - reset counter
+	r.sequentialCnt.Store(0)
+	return false
+}
+
+// triggerAsyncReadAhead queues a read-ahead request for the background worker
+func (r *Reader) triggerAsyncReadAhead(offset, size int64, isSequential bool) {
+	if r.readAhead <= 0 || r.closed.Load() || r.cache == nil {
+		return
+	}
+
+	// Calculate read-ahead range
+	readAheadStart := offset + size
+	readAheadSize := r.readAhead
+
+	// Use more aggressive read-ahead for sequential reads
+	if isSequential {
+		readAheadSize = r.readAhead * 2
+	}
+
+	// Clamp to file bounds
+	if readAheadStart >= r.fileSize {
+		return
+	}
+	if readAheadStart+readAheadSize > r.fileSize {
+		readAheadSize = r.fileSize - readAheadStart
+	}
+
+	// Check if already cached
+	if r.cacheFile.ranges.Present(common.Range{Pos: readAheadStart, Size: readAheadSize}) {
+		return
+	}
+
+	// Queue async read-ahead (non-blocking)
+	select {
+	case r.readAheadCh <- readAheadRequest{offset: readAheadStart, size: readAheadSize}:
+		// Queued successfully
+	default:
+		// Channel full, skip this read-ahead
+	}
+}
+
+// readAheadWorker processes async read-ahead requests
+func (r *Reader) readAheadWorker() {
+	for {
+		select {
+		case req := <-r.readAheadCh:
+			// Check if already cached before downloading
+			if r.cacheFile.ranges.Present(common.Range{Pos: req.offset, Size: req.size}) {
+				continue
+			}
+
+			r.stats.readAheadOps.Add(1)
+
+			// Download the read-ahead range
+			start, size := r.calculateDownloadRange(req.offset, req.size, true)
+			_ = r.downloadRange(start, size)
+
+		case <-r.readAheadStop:
+			return
+		case <-r.ctx.Done():
+			return
+		}
+	}
+}
+
+// calculateDownloadRange determines optimal download range with chunk alignment
+// includeReadAhead: false for immediate reads (read-ahead is async), true for read-ahead downloads
+func (r *Reader) calculateDownloadRange(offset, size int64, includeReadAhead bool) (start, downloadSize int64) {
 	end := offset + size
-	if r.readAhead > 0 {
+
+	// Only include read-ahead for background read-ahead operations
+	if includeReadAhead && r.readAhead > 0 {
 		end += r.readAhead
 	}
 
@@ -364,17 +553,27 @@ func (r *Reader) doSequentialDownload(offset, size int64) error {
 
 // GetStats returns comprehensive statistics
 func (r *Reader) GetStats() map[string]interface{} {
-	cacheStats := r.cache.GetStats()
+	// Get ring buffer stats
+	rbStart, rbFilled, rbCap := r.ringBuffer.Stats()
 
 	stats := map[string]interface{}{
 		// Reader stats
-		"reads":            r.stats.reads.Load(),
-		"cache_hits":       r.stats.cacheHits.Load(),
-		"cache_misses":     r.stats.cacheMisses.Load(),
-		"downloads":        r.stats.downloads.Load(),
-		"bytes_read":       r.stats.bytesRead.Load(),
-		"bytes_written":    r.stats.bytesWritten.Load(),
-		"active_downloads": r.activeDownloads.Load(),
+		"reads":             r.stats.reads.Load(),
+		"cache_hits":        r.stats.cacheHits.Load(),
+		"cache_misses":      r.stats.cacheMisses.Load(),
+		"downloads":         r.stats.downloads.Load(),
+		"bytes_read":        r.stats.bytesRead.Load(),
+		"bytes_written":     r.stats.bytesWritten.Load(),
+		"active_downloads":  r.activeDownloads.Load(),
+		"ring_buffer_hits":  r.stats.ringBufferHits.Load(),
+		"read_ahead_ops":    r.stats.readAheadOps.Load(),
+		"sequential_count":  r.sequentialCnt.Load(),
+		"cache_enabled":     r.cache != nil,
+
+		// Ring buffer info
+		"ring_buffer_start":    rbStart,
+		"ring_buffer_filled":   rbFilled,
+		"ring_buffer_capacity": rbCap,
 
 		// File info
 		"file_size":      r.fileSize,
@@ -384,16 +583,19 @@ func (r *Reader) GetStats() map[string]interface{} {
 		"max_concurrent": r.maxConcurrent,
 	}
 
-	// Add cache stats
-	for k, v := range cacheStats {
-		stats["cache_"+k] = v
+	// Add cache stats if caching is enabled
+	if r.cache != nil {
+		cacheStats := r.cache.GetStats()
+		for k, v := range cacheStats {
+			stats["cache_"+k] = v
+		}
 	}
 
 	// Calculate hit ratio
 	totalReads := r.stats.reads.Load()
 	if totalReads > 0 {
-		hitRatio := float64(r.stats.cacheHits.Load()) / float64(totalReads)
-		stats["cache_hit_ratio"] = hitRatio
+		hitRatio := float64(r.stats.cacheHits.Load()+r.stats.ringBufferHits.Load()) / float64(totalReads)
+		stats["combined_hit_ratio"] = hitRatio
 	}
 
 	return stats
@@ -438,6 +640,11 @@ func (r *Reader) Close() error {
 		return nil
 	}
 
+	// Stop read-ahead worker first (only started when cache is enabled)
+	if r.cache != nil {
+		close(r.readAheadStop)
+	}
+
 	// Cancel context to stop new downloads
 	r.cancel()
 
@@ -460,7 +667,7 @@ func (r *Reader) Close() error {
 
 	// Release cache file reference
 	// This decrements refCount so cache cleanup can eventually evict the file
-	if r.cacheFile != nil {
+	if r.cache != nil && r.cacheFile != nil {
 		r.cache.ReleaseCacheFile(r.cacheFile)
 	}
 
@@ -473,8 +680,13 @@ func (r *Reader) Prefetch(offset, size int64) error {
 		return io.ErrClosedPipe
 	}
 
-	// Align to chunk boundaries
-	start, downloadSize := r.calculateDownloadRange(offset, size)
+	// Prefetch is a no-op when caching is disabled
+	if r.cache == nil {
+		return nil
+	}
+
+	// Align to chunk boundaries (no read-ahead for explicit prefetch)
+	start, downloadSize := r.calculateDownloadRange(offset, size, false)
 
 	// Check if already cached
 	if r.cacheFile.ranges.Present(common.Range{Pos: start, Size: downloadSize}) {

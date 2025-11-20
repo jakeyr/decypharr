@@ -200,9 +200,6 @@ type DFS struct {
 	AttrTimeout     string `json:"attr_timeout,omitempty"`     // Attribute cache timeout
 	EntryTimeout    string `json:"entry_timeout,omitempty"`    // Directory entry cache timeout
 	NegativeTimeout string `json:"negative_timeout,omitempty"` // Negative lookup cache timeout
-
-	// Health and monitoring
-	StatsInterval string `json:"stats_interval,omitempty"` // How often to log stats
 }
 
 type ExternalRclone struct {
@@ -904,9 +901,6 @@ func (c *Config) setDefaults() {
 
 	// DFS defaults
 	if c.Mount.Type == MountTypeDFS {
-		if c.Mount.DFS.CacheDir == "" {
-			c.Mount.DFS.CacheDir = filepath.Join(GetMainPath(), "fs", "cache")
-		}
 		if c.Mount.DFS.ChunkSize == "" {
 			c.Mount.DFS.ChunkSize = DefaultDFSChunkSize
 		}

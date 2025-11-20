@@ -1,11 +1,8 @@
 package manager
 
 import (
-	"errors"
 	"fmt"
-	"sync/atomic"
 
-	"github.com/sirrobot01/decypharr/internal/utils"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
@@ -14,9 +11,9 @@ import (
 // GetDownloadLink gets or fetches a download link for a file
 func (m *Manager) GetDownloadLink(torrent *storage.Torrent, filename string) (types.DownloadLink, error) {
 	// GetReader the file
-	file, ok := torrent.Files[filename]
-	if !ok {
-		return types.DownloadLink{}, fmt.Errorf("file %s not found in torrent %s", filename, torrent.GetFolder())
+	file, err := torrent.GetFile(filename)
+	if err != nil {
+		return types.DownloadLink{}, fmt.Errorf("file %s not found in torrent %s: %w", filename, torrent.Name, err)
 	}
 	// GetReader placement and placement file
 	placementFile, err := m.getPlacementFile(torrent, filename)
@@ -28,12 +25,6 @@ func (m *Manager) GetDownloadLink(torrent *storage.Torrent, filename string) (ty
 	fileLink := placementFile.Link
 	if fileLink == "" {
 		return types.DownloadLink{}, fmt.Errorf("file link is missing for %s in torrent %s after refresh", filename, torrent.Name)
-	}
-
-	// Check failure counter
-	counter, ok := m.failedLinksCounter.Load(fileLink)
-	if ok && counter.Load() >= int32(m.config.Retries) {
-		return types.DownloadLink{}, fmt.Errorf("file link generation %s has failed %d times, not retrying", fileLink, counter.Load())
 	}
 
 	// Use singleflight to deduplicate concurrent requests
@@ -129,91 +120,9 @@ func (m *Manager) fetchDownloadLink(torrent *storage.Torrent, file *storage.File
 	}
 	downloadLink, err := client.GetDownloadLink(placement.ID, &debridFile)
 	if err != nil {
-		if errors.Is(err, utils.HosterUnavailableError) {
-			// Hoster unavailable - trigger repair
-			m.logger.Debug().
-				Str("filename", file.Name).
-				Str("debrid", debridName).
-				Msg("Hoster unavailable, attempting repair")
-
-			success, moveErr := m.fixer.ReInsertTorrent(torrent)
-			if moveErr != nil || !success {
-				return emptyDownloadLink, fmt.Errorf("failed to repair torrent after hoster unavailable: %w", moveErr)
-			}
-
-			// Retry with potentially new debrid
-			newTorrent, err := m.GetTorrent(torrent.InfoHash)
-			if err != nil {
-				return emptyDownloadLink, fmt.Errorf("failed to get torrent after repair: %w", err)
-			}
-
-			newDebridName := newTorrent.ActiveDebrid
-			newPlacementFile, err := m.getPlacementFile(newTorrent, file.Name)
-			if err != nil {
-				return emptyDownloadLink, fmt.Errorf("failed to get placement file after repair: %w", err)
-			}
-
-			// Retry download link fetch
-			return m.fetchDownloadLink(newTorrent, file, newPlacementFile, newDebridName)
-		} else if errors.Is(err, utils.TrafficExceededError) {
-			return emptyDownloadLink, err
-		} else {
-			return emptyDownloadLink, fmt.Errorf("failed to get download link: %w", err)
-		}
+		return types.DownloadLink{}, err
 	}
 	return downloadLink, nil
-}
-
-// IncrementFailedLinkCounter increments the failure counter for a link
-func (m *Manager) IncrementFailedLinkCounter(link string) int32 {
-	counter, _ := m.failedLinksCounter.LoadOrCompute(link, func() (atomic.Int32, bool) {
-		return atomic.Int32{}, true
-	})
-	return counter.Add(1)
-}
-
-// MarkLinkAsInvalid marks a download link as invalid
-func (m *Manager) MarkLinkAsInvalid(downloadLink types.DownloadLink, reason string) {
-	// Increment file link error counter
-	m.IncrementFailedLinkCounter(downloadLink.Link)
-
-	if m.invalidDownloadLinks != nil {
-		m.invalidDownloadLinks.Store(downloadLink.DownloadLink, reason)
-	}
-
-	client := m.DebridClient(downloadLink.Debrid)
-	if client == nil {
-		return
-	}
-
-	accountManager := client.AccountManager()
-
-	if reason == "bandwidth_exceeded" {
-		// Disable the account
-		account, err := accountManager.GetAccount(downloadLink.Token)
-		if err != nil {
-			m.logger.Error().Err(err).Str("token", utils.Mask(downloadLink.Token)).Msg("Failed to get account to disable")
-			return
-		}
-		if account == nil {
-			m.logger.Error().Str("token", utils.Mask(downloadLink.Token)).Msg("Account not found to disable")
-			return
-		}
-		accountManager.Disable(account)
-	} else if reason == "link_not_found" {
-		// Delete the download link from the account
-		account, err := accountManager.GetAccount(downloadLink.Token)
-		if err != nil {
-			return
-		}
-		if account == nil {
-			return
-		}
-
-		if err := client.DeleteDownloadLink(account, downloadLink); err != nil {
-			return
-		}
-	}
 }
 
 // GetDownloadByteRange gets the byte range for a file

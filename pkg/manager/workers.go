@@ -168,12 +168,8 @@ func (m *Manager) StartWorker(ctx context.Context) error {
 		// Schedule the job
 		if _, err := m.cetScheduler.NewJob(jd, gocron.NewTask(func() {
 			// Reset invalid download links map at midnight CET
-			if m.invalidDownloadLinks != nil {
-				m.invalidDownloadLinks.Clear()
-				m.logger.Debug().Msg("Cleared invalid download links cache")
-			}
+			m.touchedLinks.Clear()
 			// Reset failed links counter
-			m.failedLinksCounter.Clear()
 			m.logger.Debug().Msg("Cleared failed links counter")
 		}), gocron.WithContext(ctx)); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to create link reset job")

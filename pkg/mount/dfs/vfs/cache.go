@@ -58,7 +58,13 @@ type CacheFile struct {
 }
 
 // NewCache creates a new sparse file cache
+// Returns nil if CacheDir is empty (caching disabled)
 func NewCache(ctx context.Context, config *common.FuseConfig) (*Cache, error) {
+	// If CacheDir is empty, caching is disabled
+	if config.CacheDir == "" {
+		return nil, nil
+	}
+
 	if err := os.MkdirAll(config.CacheDir, 0755); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}

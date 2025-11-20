@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-co-op/gocron/v2"
@@ -48,14 +47,9 @@ type Manager struct {
 	queue        *Queue
 
 	// downloading
-	downloadSG           singleflight.Group
-	refreshSG            singleflight.Group
-	invalidDownloadLinks *xsync.Map[string, string]
-	failedLinksCounter   *xsync.Map[string, atomic.Int32]
-
-	// Multi-debrid error tracking for automatic switching
-	// Key format: "infohash:operation" where operation is "download" or "stream"
-	torrentErrorCounters *xsync.Map[string, atomic.Int32]
+	downloadSG   singleflight.Group
+	refreshSG    singleflight.Group
+	touchedLinks *xsync.Map[string, error]
 
 	// repair
 	fixer *Fixer
@@ -137,20 +131,18 @@ func New() *Manager {
 	}
 
 	instance := &Manager{
-		storage:              strg,
-		clients:              xsync.NewMap[string, debrid.Client](),
-		logger:               _logger,
-		migrationJobs:        xsync.NewMap[string, *storage.SwitcherJob](),
-		config:               cfg,
-		arr:                  arr.NewStorage(),
-		queue:                newQueue(ctx, strg, 1000, cfg.RemoveStalledAfter),
-		mountPaths:           make(map[string]*FileInfo),
-		invalidDownloadLinks: xsync.NewMap[string, string](),
-		failedLinksCounter:   xsync.NewMap[string, atomic.Int32](),
-		torrentErrorCounters: xsync.NewMap[string, atomic.Int32](),
-		ctx:                  ctx,
-		ready:                make(chan struct{}),
-		streamClient:         streamClient,
+		storage:       strg,
+		clients:       xsync.NewMap[string, debrid.Client](),
+		logger:        _logger,
+		migrationJobs: xsync.NewMap[string, *storage.SwitcherJob](),
+		config:        cfg,
+		arr:           arr.NewStorage(),
+		queue:         newQueue(ctx, strg, 1000, cfg.RemoveStalledAfter),
+		mountPaths:    make(map[string]*FileInfo),
+		touchedLinks:  xsync.NewMap[string, error](),
+		ctx:           ctx,
+		ready:         make(chan struct{}),
+		streamClient:  streamClient,
 	}
 
 	instance.init()

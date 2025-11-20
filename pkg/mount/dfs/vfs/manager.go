@@ -42,7 +42,7 @@ type ReaderEntry struct {
 func NewManager(mgr *manager.Manager, cfg *common.FuseConfig) (*Manager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Create shared sparse cache
+	// Create shared sparse cache (nil if caching disabled)
 	cache, err := NewCache(ctx, cfg)
 	if err != nil {
 		cancel()
@@ -52,13 +52,20 @@ func NewManager(mgr *manager.Manager, cfg *common.FuseConfig) (*Manager, error) 
 	m := &Manager{
 		manager: mgr,
 		readers: xsync.NewMap[string, *ReaderEntry](),
-		cache:   cache,
+		cache:   cache, // Can be nil if caching disabled
 		ctx:     ctx,
 		cancel:  cancel,
 		logger:  logger.New("dfs-vfs"),
 		config:  cfg,
 	}
-	go m.cleanupLoop(ctx, cfg.CacheCleanupInterval)
+
+	if cache != nil {
+		// Only run cleanup loop if caching is enabled
+		go m.cleanupLoop(ctx, cfg.CacheCleanupInterval)
+	} else {
+		// Run a simpler cleanup loop for just readers when caching disabled
+		go m.readerCleanupLoop(ctx, cfg.CacheCleanupInterval)
+	}
 
 	return m, nil
 }
@@ -109,7 +116,7 @@ func (m *Manager) ReleaseReader(info *manager.FileInfo) {
 	}
 }
 
-// cleanupLoop removes idle readers
+// cleanupLoop removes idle readers and manages cache
 func (m *Manager) cleanupLoop(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -124,6 +131,25 @@ func (m *Manager) cleanupLoop(ctx context.Context, interval time.Duration) {
 
 			_, _, _ = m.cleanupSg.Do("cache_cleanup", func() (interface{}, error) {
 				m.cache.cleanup()
+				return nil, nil
+			})
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// readerCleanupLoop removes idle readers when caching is disabled
+func (m *Manager) readerCleanupLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			_, _, _ = m.cleanupSg.Do("idle_reader_cleanup", func() (interface{}, error) {
+				m.cleanupUnusedReaders()
 				return nil, nil
 			})
 
@@ -187,6 +213,7 @@ func (m *Manager) GetStats() map[string]interface{} {
 		"total_readers":  m.totalReaders.Load(),
 		"active_readers": m.activeReaders.Load(),
 		"reuse_count":    m.reuseCount.Load(),
+		"cache_enabled":  m.cache != nil,
 	}
 
 	// Add cache stats if available
