@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+// MetadataStore interface for looking up arr metadata by infohash
+type MetadataStore interface {
+	GetArrForTorrent(infohash string) (string, bool)
+}
+
 const (
 	filterByInclude string = "include"
 	filterByExclude string = "exclude"
@@ -68,6 +73,7 @@ type torrentCache struct {
 	sortNeeded         atomic.Bool
 	arrFolders         atomic.Value
 	arrFoldersEnabled  bool
+	metadataStore      MetadataStore // Interface for arr metadata lookups
 }
 
 type sortableFile struct {
@@ -79,7 +85,7 @@ type sortableFile struct {
 	arrDir  string
 }
 
-func newTorrentCache(dirFilters map[string][]directoryFilter, arrFoldersEnabled bool) *torrentCache {
+func newTorrentCache(dirFilters map[string][]directoryFilter, arrFoldersEnabled bool, metadataStore MetadataStore) *torrentCache {
 	tc := &torrentCache{
 		torrents:         []CachedTorrentEntry{},
 		idIndex:          make(map[string]int),
@@ -90,6 +96,7 @@ func newTorrentCache(dirFilters map[string][]directoryFilter, arrFoldersEnabled 
 		},
 		directoriesFilters: dirFilters,
 		arrFoldersEnabled:  arrFoldersEnabled,
+		metadataStore:      metadataStore,
 	}
 
 	tc.sortNeeded.Store(false)
@@ -440,6 +447,12 @@ func (tc *torrentCache) refreshListing() {
 }
 
 func (tc *torrentCache) arrDirectory(t CachedTorrent) string {
+	// Metadata store is the source of truth for arr mappings
+	if tc.metadataStore != nil && t.InfoHash != "" {
+		if arrName, found := tc.metadataStore.GetArrForTorrent(t.InfoHash); found {
+			return strings.ToLower(arrName)
+		}
+	}
 	if t.Arr == nil {
 		return ""
 	}

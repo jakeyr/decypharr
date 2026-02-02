@@ -20,6 +20,7 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/pkg/debrid/common"
+	"github.com/sirrobot01/decypharr/pkg/metadata"
 	"github.com/sirrobot01/decypharr/pkg/rclone"
 
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
@@ -81,8 +82,9 @@ type Cache struct {
 	client common.Client
 	logger zerolog.Logger
 
-	torrents     *torrentCache
-	folderNaming WebDavFolderNaming
+	torrents       *torrentCache
+	metadataStore  *metadata.Store // Permanent arr metadata storage
+	folderNaming   WebDavFolderNaming
 
 	listingDebouncer *utils.Debouncer[bool]
 	// monitors
@@ -176,10 +178,21 @@ func NewDebridCache(dc config.Debrid, client common.Client, mounter *rclone.Moun
 		Timeout:   0,
 	}
 
+	// Initialize metadata store for permanent arr mappings
+	metadataDBPath := filepath.Join(cfg.Path, "arr_metadata.db")
+	metadataStore, err := metadata.NewStore(metadataDBPath, _log)
+	if err != nil {
+		_log.Error().Err(err).Msg("Failed to initialize metadata store, continuing without it")
+		metadataStore = nil // Continue without metadata store
+	} else {
+		_log.Info().Str("path", metadataDBPath).Msg("Initialized permanent arr metadata store")
+	}
+
 	c := &Cache{
 		dir: filepath.Join(cfg.Path, "cache", dc.Name), // path to save cache files
 
-		torrents:                     newTorrentCache(dirFilters, resolveArrFolderEnabled(dc)),
+		torrents:                     newTorrentCache(dirFilters, resolveArrFolderEnabled(dc), metadataStore),
+		metadataStore:                metadataStore,
 		client:                       client,
 		logger:                       _log,
 		workers:                      dc.Workers,
@@ -609,6 +622,13 @@ func (c *Cache) GetArrFolders() []string {
 }
 
 func (c *Cache) Close() error {
+	if c.metadataStore == nil {
+		return nil
+	}
+	if err := c.metadataStore.Close(); err != nil {
+		c.logger.Error().Err(err).Msg("Failed to close metadata store")
+		return err
+	}
 	return nil
 }
 
@@ -750,6 +770,9 @@ func (c *Cache) ProcessTorrent(t *types.Torrent) error {
 		if err != nil {
 			addedOn = time.Now()
 		}
+
+		// Don't preserve arr metadata in cache - metadata store is source of truth
+
 		ct := CachedTorrent{
 			Torrent:    t,
 			IsComplete: len(t.Files) > 0,
@@ -773,6 +796,23 @@ func (c *Cache) Add(t *types.Torrent) error {
 	if err != nil {
 		addedOn = time.Now()
 	}
+
+	// Save arr metadata to permanent store if present
+	if t.Arr != nil && c.metadataStore != nil && t.InfoHash != "" {
+		if err := c.metadataStore.SetArrForTorrent(t.InfoHash, t.Id, t.Name, t.Arr.Name); err != nil {
+			c.logger.Error().Err(err).
+				Str("infohash", t.InfoHash).
+				Str("arr_name", t.Arr.Name).
+				Msg("Failed to save arr metadata to permanent store")
+		} else {
+			c.logger.Info().
+				Str("infohash", t.InfoHash).
+				Str("arr_name", t.Arr.Name).
+				Str("torrent_name", t.Name).
+				Msg("Saved arr metadata to permanent store")
+		}
+	}
+
 	ct := CachedTorrent{
 		Torrent:    t,
 		IsComplete: len(t.Files) > 0,
