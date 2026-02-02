@@ -179,7 +179,7 @@ func NewDebridCache(dc config.Debrid, client common.Client, mounter *rclone.Moun
 	c := &Cache{
 		dir: filepath.Join(cfg.Path, "cache", dc.Name), // path to save cache files
 
-		torrents:                     newTorrentCache(dirFilters),
+		torrents:                     newTorrentCache(dirFilters, resolveArrFolderEnabled(dc)),
 		client:                       client,
 		logger:                       _log,
 		workers:                      dc.Workers,
@@ -207,6 +207,13 @@ func NewDebridCache(dc config.Debrid, client common.Client, mounter *rclone.Moun
 		c.RefreshListings(refreshRclone)
 	})
 	return c
+}
+
+func resolveArrFolderEnabled(dc config.Debrid) bool {
+	if dc.UseArrFolders != nil {
+		return *dc.UseArrFolders
+	}
+	return true
 }
 
 func (c *Cache) IsReady() chan struct{} {

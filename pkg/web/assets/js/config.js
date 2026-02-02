@@ -477,6 +477,17 @@ class ConfigManager {
                             </div>
 
                             <div class="form-control">
+                                <label class="label cursor-pointer justify-start gap-2">
+                                    <input type="checkbox" class="checkbox webdav-field"
+                                           name="debrid[${index}].use_arr_folders" id="debrid[${index}].use_arr_folders" checked>
+                                    <span class="label-text font-medium">Group by Arr Category</span>
+                                </label>
+                                <div class="label">
+                                    <span class="label-text-alt">Show Arr-specific folders (e.g. /sonarr, /radarr)</span>
+                                </div>
+                            </div>
+
+                            <div class="form-control">
                                 <label class="label" for="debrid[${index}].rc_url">
                                     <span class="label-text font-medium">Rclone RC URL</span>
                                 </label>
@@ -1136,6 +1147,7 @@ class ConfigManager {
                 debrid.download_links_refresh_interval = document.querySelector(`[name="debrid[${i}].download_links_refresh_interval"]`).value;
                 debrid.auto_expire_links_after = document.querySelector(`[name="debrid[${i}].auto_expire_links_after"]`).value;
                 debrid.folder_naming = document.querySelector(`[name="debrid[${i}].folder_naming"]`).value;
+                debrid.use_arr_folders = document.querySelector(`[name="debrid[${i}].use_arr_folders"]`).checked;
                 debrid.workers = parseInt(document.querySelector(`[name="debrid[${i}].workers"]`).value);
                 debrid.rc_url = document.querySelector(`[name="debrid[${i}].rc_url"]`).value;
                 debrid.rc_user = document.querySelector(`[name="debrid[${i}].rc_user"]`).value;
@@ -1322,5 +1334,3 @@ class ConfigManager {
         }
     }
 }
-
-

@@ -11,6 +11,7 @@ type WebDav struct {
 	Workers                      int    `json:"workers,omitempty"`
 	AutoExpireLinksAfter         string `json:"auto_expire_links_after,omitempty"`
 	ServeFromRclone              bool   `json:"serve_from_rclone,omitempty"`
+	UseArrFolders                *bool  `json:"use_arr_folders,omitempty"`
 
 	// Folder
 	FolderNaming string `json:"folder_naming,omitempty"`

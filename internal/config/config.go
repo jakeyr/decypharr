@@ -49,14 +49,14 @@ type Debrid struct {
 }
 
 type QBitTorrent struct {
-	Username          	string   `json:"username,omitempty"`
-	Password          	string   `json:"password,omitempty"`
-	Port              	string   `json:"port,omitempty"` // deprecated
-	DownloadFolder    	string   `json:"download_folder,omitempty"`
-	Categories        	[]string `json:"categories,omitempty"`
-	RefreshInterval   	int      `json:"refresh_interval,omitempty"`
-	SkipPreCache      	bool     `json:"skip_pre_cache,omitempty"`
-	MaxDownloads      	int      `json:"max_downloads,omitempty"`
+	Username            string   `json:"username,omitempty"`
+	Password            string   `json:"password,omitempty"`
+	Port                string   `json:"port,omitempty"` // deprecated
+	DownloadFolder      string   `json:"download_folder,omitempty"`
+	Categories          []string `json:"categories,omitempty"`
+	RefreshInterval     int      `json:"refresh_interval,omitempty"`
+	SkipPreCache        bool     `json:"skip_pre_cache,omitempty"`
+	MaxDownloads        int      `json:"max_downloads,omitempty"`
 	AlwaysRmTrackerUrls bool     `json:"always_rm_tracker_urls,omitempty"`
 }
 
@@ -353,6 +353,7 @@ func (c *Config) updateDebrid(d Debrid) Debrid {
 	perDebrid := workers / len(c.Debrids)
 
 	var downloadKeys []string
+	defaultTrue := true
 
 	if len(d.DownloadAPIKeys) > 0 {
 		downloadKeys = d.DownloadAPIKeys
@@ -374,6 +375,13 @@ func (c *Config) updateDebrid(d Debrid) Debrid {
 	}
 	if d.Workers == 0 {
 		d.Workers = perDebrid
+	}
+	if d.UseArrFolders == nil {
+		if c.WebDav.UseArrFolders != nil {
+			d.UseArrFolders = c.WebDav.UseArrFolders
+		} else {
+			d.UseArrFolders = &defaultTrue
+		}
 	}
 	if d.FolderNaming == "" {
 		d.FolderNaming = cmp.Or(c.WebDav.FolderNaming, "original_no_ext")
