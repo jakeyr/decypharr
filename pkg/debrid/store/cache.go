@@ -597,6 +597,10 @@ func (c *Cache) GetCustomFolders() []string {
 	return c.customFolders
 }
 
+func (c *Cache) GetArrFolders() []string {
+	return c.torrents.getArrFolders()
+}
+
 func (c *Cache) Close() error {
 	return nil
 }

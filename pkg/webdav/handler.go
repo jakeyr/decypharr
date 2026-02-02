@@ -131,6 +131,8 @@ func (h *Handler) getTorrentsFolders(folder string) []os.FileInfo {
 func (h *Handler) getParentItems() []string {
 	parents := []string{"__all__", "torrents", "__bad__"}
 
+	parents = append(parents, h.cache.GetArrFolders()...)
+
 	// Add custom folders
 	parents = append(parents, h.cache.GetCustomFolders()...)
 

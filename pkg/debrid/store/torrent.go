@@ -66,6 +66,7 @@ type torrentCache struct {
 	folders            folders
 	directoriesFilters map[string][]directoryFilter
 	sortNeeded         atomic.Bool
+	arrFolders         atomic.Value
 }
 
 type sortableFile struct {
@@ -74,6 +75,7 @@ type sortableFile struct {
 	modTime time.Time
 	size    int64
 	bad     bool
+	arrDir  string
 }
 
 func newTorrentCache(dirFilters map[string][]directoryFilter) *torrentCache {
@@ -90,6 +92,7 @@ func newTorrentCache(dirFilters map[string][]directoryFilter) *torrentCache {
 
 	tc.sortNeeded.Store(false)
 	tc.listing.Store(make([]os.FileInfo, 0))
+	tc.arrFolders.Store([]string{})
 	return tc
 }
 
@@ -284,7 +287,14 @@ func (tc *torrentCache) refreshListing() {
 	for name, index := range tc.nameIndex {
 		if index < len(tc.torrents) && !tc.torrents[index].deleted {
 			t := tc.torrents[index].CachedTorrent
-			all = append(all, sortableFile{t.Id, name, t.AddedOn, t.Bytes, t.Bad})
+			all = append(all, sortableFile{
+				id:      t.Id,
+				name:    name,
+				modTime: t.AddedOn,
+				size:    t.Bytes,
+				bad:     t.Bad,
+				arrDir:  tc.arrDirectory(t),
+			})
 		}
 	}
 	tc.sortNeeded.Store(false)
@@ -335,6 +345,53 @@ func (tc *torrentCache) refreshListing() {
 		tc.folders.Unlock()
 	}()
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		arrFolders := make(map[string][]os.FileInfo)
+		for _, sf := range all {
+			if sf.arrDir == "" {
+				continue
+			}
+			arrFolders[sf.arrDir] = append(arrFolders[sf.arrDir], &fileInfo{
+				id:      sf.id,
+				name:    sf.name,
+				size:    sf.size,
+				mode:    0755 | os.ModeDir,
+				modTime: sf.modTime,
+				isDir:   true,
+			})
+		}
+
+		currentArrFolders := make([]string, 0, len(arrFolders))
+		for folder := range arrFolders {
+			currentArrFolders = append(currentArrFolders, folder)
+		}
+		sort.Strings(currentArrFolders)
+
+		var previousArrFolders []string
+		if value := tc.arrFolders.Load(); value != nil {
+			previousArrFolders = value.([]string)
+		}
+
+		tc.folders.Lock()
+		for _, folder := range previousArrFolders {
+			if _, ok := arrFolders[folder]; !ok {
+				delete(tc.folders.listing, folder)
+			}
+		}
+
+		for folder, entries := range arrFolders {
+			existing := tc.folders.listing[folder]
+			if len(existing) > 0 {
+				entries = mergeFileInfos(existing, entries)
+			}
+			tc.folders.listing[folder] = entries
+		}
+		tc.folders.Unlock()
+		tc.arrFolders.Store(currentArrFolders)
+	}()
+
 	now := time.Now()
 	wg.Add(len(tc.directoriesFilters)) // for each directory filter
 	for dir, filters := range tc.directoriesFilters {
@@ -362,6 +419,42 @@ func (tc *torrentCache) refreshListing() {
 	}
 
 	wg.Wait()
+}
+
+func (tc *torrentCache) arrDirectory(t CachedTorrent) string {
+	if t.Arr == nil {
+		return ""
+	}
+	if t.Arr.Type != "" {
+		return strings.ToLower(string(t.Arr.Type))
+	}
+	return strings.ToLower(t.Arr.Name)
+}
+
+func mergeFileInfos(existing, additions []os.FileInfo) []os.FileInfo {
+	if len(existing) == 0 {
+		return additions
+	}
+	seen := make(map[string]struct{}, len(existing))
+	for _, info := range existing {
+		seen[info.Name()] = struct{}{}
+	}
+	merged := append([]os.FileInfo{}, existing...)
+	for _, info := range additions {
+		if _, ok := seen[info.Name()]; ok {
+			continue
+		}
+		merged = append(merged, info)
+	}
+	return merged
+}
+
+func (tc *torrentCache) getArrFolders() []string {
+	if value := tc.arrFolders.Load(); value != nil {
+		folders := value.([]string)
+		return append([]string{}, folders...)
+	}
+	return []string{}
 }
 
 func (tc *torrentCache) getListing() []os.FileInfo {
