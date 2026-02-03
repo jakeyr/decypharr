@@ -632,6 +632,10 @@ func (c *Cache) Close() error {
 	return nil
 }
 
+func (c *Cache) MetadataStore() *metadata.Store {
+	return c.metadataStore
+}
+
 func (c *Cache) GetTorrents() map[string]CachedTorrent {
 	return c.torrents.getAll()
 }

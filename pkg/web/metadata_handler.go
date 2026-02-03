@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/sirrobot01/decypharr/pkg/metadata"
-	"github.com/sirrobot01/decypharr/pkg/wire"
 )
 
 type MetadataHandler struct {
@@ -84,26 +84,33 @@ func (h *MetadataHandler) ListMappings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For now, we'll list torrents from cache and their arr mappings
-	// This requires access to the debrid cache
-	w.Header().Set("Content-Type", "application/json")
-
-	// Get all torrents and check their metadata
-	debrids := wire.Get().Debrid()
-	allTorrents := []map[string]interface{}{}
-
-	for _, cache := range debrids.Caches() {
-		torrents := cache.GetListing("__all__")
-		for _, torrent := range torrents {
-			// Get torrent details to find infohash
-			// This is a simplified version - you may need to enhance it
-			torrentData := map[string]interface{}{
-				"name": torrent.Name(),
-			}
-
-			allTorrents = append(allTorrents, torrentData)
-		}
+	mappings, err := h.store.ListMappings()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
-	json.NewEncoder(w).Encode(allTorrents)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(mappings)
+}
+
+// DELETE /api/metadata/{infohash}
+func (h *MetadataHandler) DeleteMapping(w http.ResponseWriter, r *http.Request) {
+	if h.store == nil {
+		http.Error(w, "Metadata store not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	infohash := chi.URLParam(r, "infohash")
+	if infohash == "" {
+		http.Error(w, "Infohash is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.store.DeleteMapping(infohash); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

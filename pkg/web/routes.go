@@ -32,6 +32,7 @@ func (wb *Web) Routes() http.Handler {
 		r.Get("/download", wb.DownloadHandler)
 		r.Get("/repair", wb.RepairHandler)
 		r.Get("/stats", wb.StatsHandler)
+		r.Get("/metadata", wb.MetadataPageHandler)
 		r.Get("/settings", wb.ConfigHandler)
 
 		// API routes
@@ -57,6 +58,14 @@ func (wb *Web) Routes() http.Handler {
 			r.Post("/config", wb.handleUpdateConfig)
 			r.Post("/refresh-token", wb.handleRefreshAPIToken)
 			r.Post("/update-auth", wb.handleUpdateAuth)
+
+			// Metadata mappings
+			if wb.metadata != nil {
+				r.Get("/metadata/stats", wb.metadata.GetStats)
+				r.Get("/metadata/list", wb.metadata.ListMappings)
+				r.Post("/metadata/set", wb.metadata.SetMapping)
+				r.Delete("/metadata/{infohash}", wb.metadata.DeleteMapping)
+			}
 		})
 	})
 

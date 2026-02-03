@@ -61,11 +61,23 @@ type Web struct {
 	cookie    *sessions.CookieStore
 	templates *template.Template
 	torrents  *wire.TorrentStorage
+	metadata  *MetadataHandler
 	urlBase   string
 }
 
 func New() *Web {
 	cfg := config.Get()
+	var metadataHandler *MetadataHandler
+	debrids := wire.Get().Debrid()
+	for _, cache := range debrids.Caches() {
+		if cache == nil {
+			continue
+		}
+		if store := cache.MetadataStore(); store != nil {
+			metadataHandler = NewMetadataHandler(store)
+			break
+		}
+	}
 	templates := template.Must(template.ParseFS(
 		content,
 		"templates/layout.html",
@@ -73,6 +85,7 @@ func New() *Web {
 		"templates/download.html",
 		"templates/repair.html",
 		"templates/stats.html",
+		"templates/metadata.html",
 		"templates/config.html",
 		"templates/login.html",
 		"templates/register.html",
@@ -88,6 +101,7 @@ func New() *Web {
 		templates: templates,
 		cookie:    cookieStore,
 		torrents:  wire.Get().Torrents(),
+		metadata:  metadataHandler,
 		urlBase:   cfg.URLBase,
 	}
 }

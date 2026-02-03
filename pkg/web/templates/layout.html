@@ -54,6 +54,9 @@
                 <li><a href="{{.URLBase}}repair" class="{{if eq .Page "repair"}}active{{end}}">
                     <i class="bi bi-wrench-adjustable text-accent"></i>Repair
                     </a></li>
+                <li><a href="{{.URLBase}}metadata" class="{{if eq .Page "metadata"}}active{{end}}">
+                    <i class="bi bi-tags text-info"></i>Metadata
+                    </a></li>
                 <li><a href="{{.URLBase}}settings" class="{{if eq .Page "config"}}active{{end}}">
                     <i class="bi bi-gear text-info"></i>Settings
                     </a></li>
@@ -84,6 +87,10 @@
             <li><a href="{{.URLBase}}repair" class="{{if eq .Page "repair"}}active{{end}} tooltip tooltip-bottom" data-tip="Repair Media">
                 <i class="bi bi-wrench-adjustable"></i>
                 <span class="hidden xl:inline">Repair</span>
+                </a></li>
+            <li><a href="{{.URLBase}}metadata" class="{{if eq .Page "metadata"}}active{{end}} tooltip tooltip-bottom" data-tip="Metadata Mappings">
+                <i class="bi bi-tags"></i>
+                <span class="hidden xl:inline">Metadata</span>
                 </a></li>
             <li><a href="{{.URLBase}}settings" class="{{if eq .Page "config"}}active{{end}} tooltip tooltip-bottom" data-tip="Settings">
                 <i class="bi bi-gear"></i>
@@ -133,6 +140,8 @@
     {{ template "download" . }}
     {{ else if eq .Page "repair" }}
     {{ template "repair" . }}
+    {{ else if eq .Page "metadata" }}
+    {{ template "metadata" . }}
     {{ else if eq .Page "stats" }}
     {{ template "stats" . }}
     {{ else if eq .Page "config" }}
@@ -178,6 +187,8 @@
 <script src="{{.URLBase}}assets/js/download.js"></script>
 {{ else if eq .Page "repair" }}
 <script src="{{.URLBase}}assets/js/repair.js"></script>
+{{ else if eq .Page "metadata" }}
+<script src="{{.URLBase}}assets/js/metadata.js"></script>
 {{ else if eq .Page "config" }}
 <script src="{{.URLBase}}assets/js/config.js"></script>
 {{ end }}

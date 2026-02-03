@@ -176,3 +176,13 @@ func (wb *Web) StatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = wb.templates.ExecuteTemplate(w, "layout", data)
 }
+
+func (wb *Web) MetadataPageHandler(w http.ResponseWriter, r *http.Request) {
+	cfg := config.Get()
+	data := map[string]interface{}{
+		"URLBase": cfg.URLBase,
+		"Page":    "metadata",
+		"Title":   "Metadata",
+	}
+	_ = wb.templates.ExecuteTemplate(w, "layout", data)
+}

@@ -16,6 +16,15 @@ type Store struct {
 	logger zerolog.Logger
 }
 
+type Mapping struct {
+	Infohash    string `json:"infohash"`
+	TorrentID   string `json:"torrent_id"`
+	TorrentName string `json:"torrent_name"`
+	ArrName     string `json:"arr_name"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
 // NewStore creates a new metadata store
 func NewStore(dbPath string, logger zerolog.Logger) (*Store, error) {
 	db, err := sql.Open("sqlite", dbPath)
@@ -158,6 +167,42 @@ func (s *Store) GetStats() (total int, byArr map[string]int, err error) {
 	}
 
 	return total, byArr, rows.Err()
+}
+
+// ListMappings returns all mappings ordered by most recently updated
+func (s *Store) ListMappings() ([]Mapping, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT infohash, torrent_id, torrent_name, arr_name, created_at, updated_at
+		FROM torrent_arr_mapping
+		ORDER BY updated_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	mappings := []Mapping{}
+	for rows.Next() {
+		var m Mapping
+		if err := rows.Scan(&m.Infohash, &m.TorrentID, &m.TorrentName, &m.ArrName, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return mappings, err
+		}
+		mappings = append(mappings, m)
+	}
+
+	return mappings, rows.Err()
+}
+
+// DeleteMapping removes a mapping by infohash
+func (s *Store) DeleteMapping(infohash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("DELETE FROM torrent_arr_mapping WHERE infohash = ?", infohash)
+	return err
 }
 
 // Close closes the database connection

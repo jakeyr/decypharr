@@ -1,0 +1,93 @@
+{{ define "metadata" }}
+<div class="container mx-auto">
+    <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6">
+        <div>
+            <h1 class="text-3xl font-bold text-primary">Metadata Mappings</h1>
+            <p class="text-base-content/70">Manage permanent arr folder mappings.</p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+            <div class="join">
+                <input id="metadata-search" type="text" placeholder="Search infohash, name, arr..."
+                       class="input input-bordered join-item w-64">
+                <button id="metadata-refresh" class="btn btn-outline join-item">
+                    <i class="bi bi-arrow-clockwise"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="metadata-loading" class="text-center py-12">
+        <div class="loading loading-spinner loading-lg text-primary"></div>
+        <p class="mt-4 text-base-content/70">Loading metadata mappings...</p>
+    </div>
+
+    <div id="metadata-error" class="alert alert-error" style="display: none;">
+        <i class="bi bi-exclamation-triangle-fill"></i>
+        <span id="metadata-error-message">Failed to load metadata</span>
+        <button id="metadata-retry" class="btn btn-sm btn-outline">
+            <i class="bi bi-arrow-clockwise"></i>
+            Retry
+        </button>
+    </div>
+
+    <div id="metadata-content" class="space-y-6" style="display: none;">
+        <div class="stats stats-vertical lg:stats-horizontal shadow bg-base-100">
+            <div class="stat">
+                <div class="stat-title">Total Mappings</div>
+                <div class="stat-value text-primary" id="metadata-total">-</div>
+                <div class="stat-desc">Stored arr mappings</div>
+            </div>
+            <div class="stat">
+                <div class="stat-title">Arrs</div>
+                <div class="stat-value text-secondary" id="metadata-arr-count">-</div>
+                <div class="stat-desc" id="metadata-arr-list">-</div>
+            </div>
+        </div>
+
+        <div class="card bg-base-100 shadow-xl">
+            <div class="card-body p-0">
+                <div class="overflow-x-auto">
+                    <table class="table table-zebra">
+                        <thead>
+                        <tr>
+                            <th>Infohash</th>
+                            <th>Torrent Name</th>
+                            <th>Arr</th>
+                            <th>Updated</th>
+                            <th class="text-right">Actions</th>
+                        </tr>
+                        </thead>
+                        <tbody id="metadata-table-body">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<dialog id="metadata-edit-modal" class="modal">
+    <div class="modal-box">
+        <h3 class="font-bold text-lg">Edit Arr Mapping</h3>
+        <p class="text-sm text-base-content/70 mt-1" id="metadata-edit-title"></p>
+
+        <div class="mt-4 space-y-3">
+            <label class="form-control w-full">
+                <div class="label">
+                    <span class="label-text">Arr Name</span>
+                </div>
+                <input id="metadata-edit-arr" type="text" class="input input-bordered w-full" placeholder="sonarr / radarr / tv-sonarr">
+            </label>
+        </div>
+
+        <div class="modal-action">
+            <button class="btn btn-ghost" id="metadata-edit-cancel">Cancel</button>
+            <button class="btn btn-primary" id="metadata-edit-save">Save</button>
+        </div>
+    </div>
+    <form method="dialog" class="modal-backdrop">
+        <button>close</button>
+    </form>
+</dialog>
+
+{{ end }}
