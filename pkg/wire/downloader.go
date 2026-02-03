@@ -533,7 +533,21 @@ func (s *Store) processMultiSeasonSymlinks(torrent *Torrent, debridTorrent *type
 		cache := s.debrid.Debrid(debridTorrent.Debrid).Cache()
 		var torrentRclonePath, torrentSymlinkPath string
 		if cache != nil {
-			torrentRclonePath = filepath.Join(debridTorrent.MountPath, cache.GetTorrentFolder(debridTorrent))
+			mountBase := filepath.Clean(debridTorrent.MountPath)
+			if base := filepath.Base(mountBase); base == "__all__" || base == "torrents" {
+				mountBase = filepath.Dir(mountBase)
+			}
+			arrDir := ""
+			if store := cache.MetadataStore(); store != nil && debridTorrent.InfoHash != "" {
+				if name, found := store.GetArrForTorrent(debridTorrent.InfoHash); found {
+					arrDir = strings.ToLower(name)
+				}
+			}
+			if arrDir != "" {
+				torrentRclonePath = filepath.Join(mountBase, arrDir, cache.GetTorrentFolder(debridTorrent))
+			} else {
+				torrentRclonePath = filepath.Join(debridTorrent.MountPath, cache.GetTorrentFolder(debridTorrent))
+			}
 
 		} else {
 			// Regular mount mode

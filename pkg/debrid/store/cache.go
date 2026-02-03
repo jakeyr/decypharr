@@ -636,6 +636,25 @@ func (c *Cache) MetadataStore() *metadata.Store {
 	return c.metadataStore
 }
 
+// ArrDirectory returns the arr folder name for a torrent, if available.
+func (c *Cache) ArrDirectory(torrent *types.Torrent) string {
+	if torrent == nil {
+		return ""
+	}
+	if c.metadataStore != nil && torrent.InfoHash != "" {
+		if arrName, found := c.metadataStore.GetArrForTorrent(torrent.InfoHash); found {
+			return strings.ToLower(arrName)
+		}
+	}
+	if torrent.Arr != nil {
+		if torrent.Arr.Type != "" {
+			return strings.ToLower(string(torrent.Arr.Type))
+		}
+		return strings.ToLower(torrent.Arr.Name)
+	}
+	return ""
+}
+
 func (c *Cache) GetTorrents() map[string]CachedTorrent {
 	return c.torrents.getAll()
 }

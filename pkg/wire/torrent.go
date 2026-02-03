@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/request"
@@ -180,7 +181,21 @@ func (s *Store) processFiles(torrent *Torrent, debridTorrent *types.Torrent, imp
 		}
 
 		if cache != nil {
-			torrentRclonePath = filepath.Join(debridTorrent.MountPath, cache.GetTorrentFolder(debridTorrent)) // /mnt/remote/realdebrid/MyTVShow
+			mountBase := filepath.Clean(debridTorrent.MountPath)
+			if base := filepath.Base(mountBase); base == "__all__" || base == "torrents" {
+				mountBase = filepath.Dir(mountBase)
+			}
+			arrDir := ""
+			if store := cache.MetadataStore(); store != nil && debridTorrent.InfoHash != "" {
+				if name, found := store.GetArrForTorrent(debridTorrent.InfoHash); found {
+					arrDir = strings.ToLower(name)
+				}
+			}
+			if arrDir != "" {
+				torrentRclonePath = filepath.Join(mountBase, arrDir, cache.GetTorrentFolder(debridTorrent))
+			} else {
+				torrentRclonePath = filepath.Join(debridTorrent.MountPath, cache.GetTorrentFolder(debridTorrent))
+			}
 			torrentSymlinkPath = filepath.Join(torrent.SavePath, utils.RemoveExtension(debridTorrent.Name))   // /mnt/symlinks/{category}/MyTVShow/
 
 		} else {
