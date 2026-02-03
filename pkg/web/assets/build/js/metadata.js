@@ -75,20 +75,22 @@ document.addEventListener('DOMContentLoaded', function () {
 
         tableBody.innerHTML = filtered.map((m) => `
             <tr>
-                <td class="font-mono text-xs break-all">${m.infohash || '-'}</td>
-                <td>${m.torrent_name || '-'}</td>
-                <td><span class="badge badge-outline">${m.arr_name || '-'}</span></td>
-                <td>${formatDate(m.updated_at)}</td>
-                <td class="text-right">
-                    <div class="flex justify-end gap-2">
+                <td data-col="actions">
+                    <div class="flex gap-2 whitespace-nowrap">
                         <button class="btn btn-xs btn-outline" data-action="edit" data-infohash="${m.infohash}">
                             <i class="bi bi-pencil"></i>
+                            <span class="ml-1">Edit</span>
                         </button>
                         <button class="btn btn-xs btn-outline btn-error" data-action="delete" data-infohash="${m.infohash}">
                             <i class="bi bi-trash"></i>
+                            <span class="ml-1">Delete</span>
                         </button>
                     </div>
                 </td>
+                <td data-col="arr"><span class="badge badge-outline">${m.arr_name || '-'}</span></td>
+                <td data-col="updated" class="text-sm">${formatDate(m.updated_at)}</td>
+                <td data-col="infohash" class="font-mono text-xs break-all max-w-xs">${m.infohash || '-'}</td>
+                <td data-col="title" class="text-right truncate max-w-md" title="${m.torrent_name || ''}">${m.torrent_name || '-'}</td>
             </tr>
         `).join('');
     }

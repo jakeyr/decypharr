@@ -188,7 +188,7 @@
 {{ else if eq .Page "repair" }}
 <script src="{{.URLBase}}assets/js/repair.js"></script>
 {{ else if eq .Page "metadata" }}
-<script src="{{.URLBase}}assets/js/metadata.js"></script>
+<script src="{{.URLBase}}assets/js/metadata.js{{if .CacheBuster}}?cb={{.CacheBuster}}{{end}}"></script>
 {{ else if eq .Page "config" }}
 <script src="{{.URLBase}}assets/js/config.js"></script>
 {{ end }}

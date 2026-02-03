@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"golang.org/x/crypto/bcrypt"
@@ -180,9 +181,10 @@ func (wb *Web) StatsHandler(w http.ResponseWriter, r *http.Request) {
 func (wb *Web) MetadataPageHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
 	data := map[string]interface{}{
-		"URLBase": cfg.URLBase,
-		"Page":    "metadata",
-		"Title":   "Metadata",
+		"URLBase":     cfg.URLBase,
+		"Page":        "metadata",
+		"Title":       "Metadata",
+		"CacheBuster": time.Now().Unix(),
 	}
 	_ = wb.templates.ExecuteTemplate(w, "layout", data)
 }
