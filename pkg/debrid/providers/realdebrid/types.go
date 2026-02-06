@@ -1,9 +1,10 @@
 package realdebrid
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
+
+	json "github.com/bytedance/sonic"
 )
 
 type AvailabilityResponse map[string]Hoster

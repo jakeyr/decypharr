@@ -1,13 +1,10 @@
 package repair
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/sirrobot01/decypharr/pkg/arr"
-	"github.com/sirrobot01/decypharr/pkg/debrid/common"
-	"github.com/sirrobot01/decypharr/pkg/debrid/store"
 )
 
 func fileIsSymlinked(file string) bool {
@@ -19,6 +16,7 @@ func fileIsSymlinked(file string) bool {
 }
 
 func getSymlinkTarget(file string) string {
+	file = filepath.Clean(file)
 	if fileIsSymlinked(file) {
 		target, err := os.Readlink(file)
 		if err != nil {
@@ -31,42 +29,6 @@ func getSymlinkTarget(file string) string {
 		return target
 	}
 	return ""
-}
-
-func fileIsReadable(filePath string) error {
-	// First check if file exists and is accessible
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return err
-	}
-
-	// Check if it's a regular file
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("not a regular file")
-	}
-
-	// Try to read the first 1024 bytes
-	err = checkFileStart(filePath)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func checkFileStart(filePath string) error {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	// Read first 1kb
-	buffer := make([]byte, 1024)
-	_, err = f.Read(buffer)
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func collectFiles(media arr.Content) map[string][]arr.ContentFile {
@@ -86,41 +48,18 @@ func collectFiles(media arr.Content) map[string][]arr.ContentFile {
 	return uniqueParents
 }
 
-func (r *Repair) checkTorrentFiles(torrentPath string, files []arr.ContentFile, clients map[string]common.Client, caches map[string]*store.Cache) []arr.ContentFile {
+func (r *Repair) checkFiles(entryPath string, files []arr.ContentFile) []arr.ContentFile {
 	brokenFiles := make([]arr.ContentFile, 0)
 
-	emptyFiles := make([]arr.ContentFile, 0)
+	r.logger.Debug().Msgf("Checking %s", entryPath)
 
-	r.logger.Debug().Msgf("Checking %s", torrentPath)
-
-	// Get the debrid client
-	dir := filepath.Dir(torrentPath)
-	debridName := r.findDebridForPath(dir, clients)
-	if debridName == "" {
-		r.logger.Debug().Msgf("No debrid found for %s. Skipping", torrentPath)
-		return emptyFiles
-	}
-
-	cache, ok := caches[debridName]
-	if !ok {
-		r.logger.Debug().Msgf("No cache found for %s. Skipping", debridName)
-		return emptyFiles
-	}
-	tor, ok := r.torrentsMap.Load(debridName)
-	if !ok {
-		r.logger.Debug().Msgf("Could not find torrents for %s. Skipping", debridName)
-		return emptyFiles
-	}
-
-	torrentsMap := tor.(map[string]store.CachedTorrent)
-
-	// Check if torrent exists
-	torrentName := filepath.Clean(filepath.Base(torrentPath))
-	torrent, ok := torrentsMap[torrentName]
-	if !ok {
-		r.logger.Debug().Msgf("Can't find torrent %s in %s. Marking as broken", torrentName, debridName)
-		// Return all files as broken
-		return files
+	// Check if torrent exists in manager
+	torrentName := filepath.Clean(filepath.Base(entryPath))
+	entry, err := r.manager.GetEntryItem(torrentName)
+	if err != nil {
+		r.logger.Debug().Msgf("Can't find torrent %s in manager: %v", torrentName, err)
+		// This likely means the torrent wasn't created by Decypharr, so we can't check its files, return empty list
+		return brokenFiles
 	}
 
 	// Batch check files
@@ -129,7 +68,7 @@ func (r *Repair) checkTorrentFiles(torrentPath string, files []arr.ContentFile, 
 		filePaths[i] = file.TargetPath
 	}
 
-	brokenFilePaths := cache.GetBrokenFiles(&torrent, filePaths)
+	brokenFilePaths := r.manager.GetBrokenFiles(entry, filePaths)
 	if len(brokenFilePaths) > 0 {
 		r.logger.Debug().Msgf("%d broken files found in %s", len(brokenFilePaths), torrentName)
 
@@ -148,33 +87,4 @@ func (r *Repair) checkTorrentFiles(torrentPath string, files []arr.ContentFile, 
 	}
 
 	return brokenFiles
-}
-
-func (r *Repair) findDebridForPath(dir string, clients map[string]common.Client) string {
-	// Check cache first
-	if debridName, exists := r.debridPathCache.Load(dir); exists {
-		return debridName.(string)
-	}
-
-	// Find debrid client
-	for _, client := range clients {
-		mountPath := client.GetMountPath()
-		if mountPath == "" {
-			continue
-		}
-
-		if filepath.Clean(mountPath) == filepath.Clean(dir) {
-			debridName := client.Name()
-
-			// Cache the result
-			r.debridPathCache.Store(dir, debridName)
-
-			return debridName
-		}
-	}
-
-	// Cache empty result to avoid repeated lookups
-	r.debridPathCache.Store(dir, "")
-
-	return ""
 }

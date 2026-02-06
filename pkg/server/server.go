@@ -2,26 +2,79 @@ package server
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/gorilla/sessions"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/pkg/manager"
+	"github.com/sirrobot01/decypharr/pkg/server/qbit"
+	"github.com/sirrobot01/decypharr/pkg/server/sabnzbd"
+	"github.com/sirrobot01/decypharr/pkg/server/webdav"
 )
 
-type Server struct {
-	router *chi.Mux
-	logger zerolog.Logger
+//go:embed templates/*
+var content embed.FS
+
+//go:embed assets/build/*
+var assetsEmbed embed.FS
+
+//go:embed assets/images/*
+var imagesEmbed embed.FS
+
+type AddRequest struct {
+	Url        string   `json:"url"`
+	Arr        string   `json:"arr"`
+	File       string   `json:"file"`
+	NotSymlink bool     `json:"notSymlink"`
+	Content    string   `json:"content"`
+	Seasons    []string `json:"seasons"`
+	Episodes   []string `json:"episodes"`
 }
 
-func New(handlers map[string]http.Handler) *Server {
+type ArrResponse struct {
+	Name string `json:"name"`
+	Url  string `json:"url"`
+}
+
+type ContentResponse struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Type  string `json:"type"`
+	ArrID string `json:"arr"`
+}
+
+type RepairRequest struct {
+	ArrName       string   `json:"arr"`
+	MediaIds      []string `json:"mediaIds"`
+	AutoProcess   bool     `json:"autoProcess"`
+	Mode          string   `json:"mode"`          // "arr" or "all"
+	TorrentFilter string   `json:"torrentFilter"` // Optional filter for torrent name/infohash in "all" mode
+}
+
+type Server struct {
+	router       *chi.Mux
+	logger       zerolog.Logger
+	manager      *manager.Manager
+	cookie       *sessions.CookieStore
+	templates    *template.Template
+	nzbUserAgent string
+	urlBase      string
+	restartFunc  func()
+}
+
+func New(mgr *manager.Manager) *Server {
 	l := logger.New("http")
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
@@ -30,13 +83,50 @@ func New(handlers map[string]http.Handler) *Server {
 
 	cfg := config.Get()
 
-	s := &Server{
-		logger: l,
+	templates := template.Must(template.ParseFS(
+		content,
+		"templates/layout.html",
+		"templates/setup_layout.html",
+		"templates/index.html",
+		"templates/download.html",
+		"templates/repair.html",
+		"templates/stats.html",
+		"templates/config.html",
+		"templates/browse.html",
+		"templates/login.html",
+		"templates/register.html",
+		"templates/setup.html",
+	))
+	cookieStore := sessions.NewCookieStore([]byte(cfg.SecretKey()))
+	cookieStore.Options = &sessions.Options{
+		Path:     "/",
+		MaxAge:   86400 * 7,
+		HttpOnly: false,
 	}
 
+	s := &Server{
+		logger:    l,
+		manager:   mgr,
+		cookie:    cookieStore,
+		templates: templates,
+		urlBase:   cfg.URLBase,
+	}
+
+	qb := qbit.New(mgr)
+	sb := sabnzbd.New(mgr)
+	wd := webdav.NewHandler(mgr)
+
+	routes := make(map[string]http.Handler)
+	routes["/api/v2"] = qb.Routes()
+	routes["/webdav"] = wd.Routes()
+	routes["/sabnzbd"] = sb.Routes()
+
 	r.Route(cfg.URLBase, func(r chi.Router) {
-		for pattern, handler := range handlers {
-			r.Mount(pattern, handler)
+		// Mount web routes
+		r.Mount("/", s.WebRoutes())
+
+		for path, handler := range routes {
+			r.Mount(path, handler)
 		}
 
 		//logs
@@ -44,6 +134,7 @@ func New(handlers map[string]http.Handler) *Server {
 
 		r.Route("/debug", func(r chi.Router) {
 			r.Get("/stats", s.handleStats)
+			r.Post("/speedtest", s.handleSpeedTest)
 			r.Get("/logs", s.getLogs)
 			r.Get("/logs/rclone", s.getRcloneLogs)
 			r.Get("/ingests", s.handleIngests)
@@ -56,6 +147,19 @@ func New(handlers map[string]http.Handler) *Server {
 	})
 	s.router = r
 	return s
+}
+
+func (s *Server) SetRestartFunc(restartFunc func()) {
+	s.restartFunc = restartFunc
+}
+
+func (s *Server) Restart() {
+	if s.restartFunc != nil {
+		time.Sleep(200 * time.Millisecond)
+		s.restartFunc()
+	} else {
+		s.logger.Warn().Msg("Restart function not set")
+	}
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -104,7 +208,6 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request) {
 
 	// Stream the file
 	if _, err := io.Copy(w, file); err != nil {
-		s.logger.Error().Err(err).Msg("Error streaming log file")
 		http.Error(w, "Error streaming log file", http.StatusInternalServerError)
 		return
 	}
@@ -122,7 +225,6 @@ func (s *Server) getRcloneLogs(w http.ResponseWriter, r *http.Request) {
 	defer func(file *os.File) {
 		err := file.Close()
 		if err != nil {
-			s.logger.Error().Err(err).Msg("Error closing log file")
 			return
 
 		}
@@ -137,8 +239,7 @@ func (s *Server) getRcloneLogs(w http.ResponseWriter, r *http.Request) {
 
 	// Stream the file
 	if _, err := io.Copy(w, file); err != nil {
-		s.logger.Error().Err(err).Msg("Error streaming log file")
-		http.Error(w, "Error streaming log file", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("error stremaing file %s", err), http.StatusInternalServerError)
 		return
 	}
 }

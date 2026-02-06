@@ -4,8 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const { minify } = require('terser');
 
-const sourceDir = './pkg/web/assets/js';
-const buildDir = './pkg/web/assets/build/js';
+const sourceDir = './pkg/server/assets/js';
+const buildDir = './pkg/server/assets/build/js';
 
 // Create build directory
 if (!fs.existsSync(buildDir)) {
@@ -105,7 +105,7 @@ async function minifyAllJS() {
 
         if (processedFiles > 0) {
             const totalReduction = ((totalOriginal - totalMinified) / totalOriginal * 100).toFixed(1);
-            console.log(`\n✅ Successfully minified ${processedFiles}/${jsFiles.length} JavaScript file(s)`);
+            console.log(`\nSuccessfully minified ${processedFiles}/${jsFiles.length} JavaScript file(s)`);
             console.log(`📊 Total: ${(totalOriginal/1024).toFixed(1)}KB → ${(totalMinified/1024).toFixed(1)}KB (${totalReduction}% reduction)`);
         }
 

@@ -2,12 +2,12 @@ package arr
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"golang.org/x/sync/errgroup"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sync/errgroup"
 )
 
 type episode struct {
@@ -27,68 +27,52 @@ type radarrSearch struct {
 }
 
 func (a *Arr) GetMedia(mediaId string) ([]Content, error) {
-	// Get series
-	if a.Type == Radarr {
-		return GetMovies(a, mediaId)
-	}
-	// This is likely Sonarr
-	resp, err := a.Request(http.MethodGet, fmt.Sprintf("api/v3/series?tvdbId=%s", mediaId), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		// This is likely Radarr
-		return GetMovies(a, mediaId)
-	}
-	a.Type = Sonarr
-
+	// GetReader series
 	type series struct {
 		Title string `json:"title"`
 		Id    int    `json:"id"`
 	}
+	var data []series
+	if a.Type == Radarr {
+		return a.GetMovies(mediaId)
+	}
+	// This is likely Sonarr
+	resp, err := a.Request(http.MethodGet, fmt.Sprintf("api/v3/series?tvdbId=%s", mediaId), nil, &data)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		// This is likely Radarr
+		return a.GetMovies(mediaId)
+	}
+	a.Type = Sonarr
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to get series: %s", resp.Status)
 	}
-	var data []series
-	if err = json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("failed to decode series: %v", err)
-	}
-	// Get series files
+	// GetReader series files
 	contents := make([]Content, 0)
+	var seriesFiles []seriesFile
 	for _, d := range data {
-		resp, err = a.Request(http.MethodGet, fmt.Sprintf("api/v3/episodefile?seriesId=%d", d.Id), nil)
+		_, err = a.Request(http.MethodGet, fmt.Sprintf("api/v3/episodefile?seriesId=%d", d.Id), nil, &seriesFiles)
 		if err != nil {
 			continue
 		}
 		var ct Content
-		var seriesFiles []seriesFile
+
 		episodeFileIDMap := make(map[int]int)
-		func() {
-			defer resp.Body.Close()
-			if err = json.NewDecoder(resp.Body).Decode(&seriesFiles); err != nil {
-				return
-			}
-			ct = Content{
-				Title: d.Title,
-				Id:    d.Id,
-			}
-		}()
-		resp, err = a.Request(http.MethodGet, fmt.Sprintf("api/v3/episode?seriesId=%d", d.Id), nil)
+		ct = Content{
+			Title: d.Title,
+			Id:    d.Id,
+		}
+		var episodes []episode
+		_, err = a.Request(http.MethodGet, fmt.Sprintf("api/v3/episode?seriesId=%d", d.Id), nil, &episodes)
 		if err != nil {
 			continue
 		}
-		func() {
-			defer resp.Body.Close()
-			var episodes []episode
-			if err = json.NewDecoder(resp.Body).Decode(&episodes); err != nil {
-				return
-			}
-
-			for _, e := range episodes {
-				episodeFileIDMap[e.EpisodeFileID] = e.Id
-			}
-		}()
+		for _, e := range episodes {
+			episodeFileIDMap[e.EpisodeFileID] = e.Id
+		}
 		files := make([]ContentFile, 0)
 		for _, file := range seriesFiles {
 			eId, ok := episodeFileIDMap[file.Id]
@@ -118,8 +102,9 @@ func (a *Arr) GetMedia(mediaId string) ([]Content, error) {
 	return contents, nil
 }
 
-func GetMovies(a *Arr, tvId string) ([]Content, error) {
-	resp, err := a.Request(http.MethodGet, fmt.Sprintf("api/v3/movie?tmdbId=%s", tvId), nil)
+func (a *Arr) GetMovies(tvId string) ([]Content, error) {
+	var movies []Movie
+	resp, err := a.Request(http.MethodGet, fmt.Sprintf("api/v3/movie?tmdbId=%s", tvId), nil, &movies)
 	if err != nil {
 		return nil, err
 	}
@@ -128,11 +113,6 @@ func GetMovies(a *Arr, tvId string) ([]Content, error) {
 		return nil, fmt.Errorf("failed to get movies: %s", resp.Status)
 	}
 	a.Type = Radarr
-	defer resp.Body.Close()
-	var movies []Movie
-	if err = json.NewDecoder(resp.Body).Decode(&movies); err != nil {
-		return nil, fmt.Errorf("failed to decode movies: %v", err)
-	}
 	contents := make([]Content, 0)
 	for _, movie := range movies {
 		if movie.MovieFile.Id == 0 || movie.MovieFile.Path == "" {
@@ -172,9 +152,7 @@ func (a *Arr) searchSonarr(files []ContentFile) error {
 	// Limit concurrent goroutines
 	g.SetLimit(10)
 	for id := range ids {
-		id := id
 		g.Go(func() error {
-
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -198,7 +176,7 @@ func (a *Arr) searchSonarr(files []ContentFile) error {
 				SeasonNumber: seasonNumber,
 				SeriesId:     seriesId,
 			}
-			resp, err := a.Request(http.MethodPost, "api/v3/command", payload)
+			resp, err := a.Request(http.MethodPost, "api/v3/command", payload, nil)
 			if err != nil {
 				return fmt.Errorf("failed to automatic search: %v", err)
 			}
@@ -223,7 +201,7 @@ func (a *Arr) searchRadarr(files []ContentFile) error {
 		Name:     "MoviesSearch",
 		MovieIds: ids,
 	}
-	resp, err := a.Request(http.MethodPost, "api/v3/command", payload)
+	resp, err := a.Request(http.MethodPost, "api/v3/command", payload, nil)
 	if err != nil {
 		return fmt.Errorf("failed to automatic search: %v", err)
 	}
@@ -314,7 +292,7 @@ func (a *Arr) batchDeleteFiles(files []ContentFile) error {
 		}{
 			EpisodeFileIds: ids,
 		}
-		_, err := a.Request(http.MethodDelete, "api/v3/episodefile/bulk", payload)
+		_, err := a.Request(http.MethodDelete, "api/v3/episodefile/bulk", payload, nil)
 		if err != nil {
 			return err
 		}
@@ -324,7 +302,7 @@ func (a *Arr) batchDeleteFiles(files []ContentFile) error {
 		}{
 			MovieFileIds: ids,
 		}
-		_, err := a.Request(http.MethodDelete, "api/v3/moviefile/bulk", payload)
+		_, err := a.Request(http.MethodDelete, "api/v3/moviefile/bulk", payload, nil)
 		if err != nil {
 			return err
 		}

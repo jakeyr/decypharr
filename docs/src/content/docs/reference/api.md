@@ -1,0 +1,287 @@
+---
+title: API Reference
+description: REST API endpoints.
+---
+
+Decypharr provides a REST API for programmatic access.
+
+## Authentication
+
+Include API token in Authorization header:
+
+```bash
+curl -H "Authorization: Bearer YOUR_API_TOKEN" \
+  http://localhost:8282/api/torrents
+```
+
+Get API token from **Settings** → **Auth** after login.
+
+## Endpoints
+
+### GET /version
+
+Get Decypharr version.
+
+```bash
+curl http://localhost:8282/version
+```
+
+**Response:**
+```json
+{
+  "version": "1.0.0"
+}
+```
+
+### GET /api/config
+
+Get current configuration.
+
+```bash
+curl -H "Authorization: Bearer TOKEN" \
+  http://localhost:8282/api/config
+```
+
+### POST /api/config
+
+Update configuration.
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"log_level": "debug"}' \
+  http://localhost:8282/api/config
+```
+
+### GET /api/torrents
+
+List all torrents.
+
+```bash
+curl -H "Authorization: Bearer TOKEN" \
+  http://localhost:8282/api/torrents
+```
+
+**Query Parameters:**
+- `category`: Filter by category
+- `hash`: Get specific torrent
+
+### POST /api/add
+
+Add torrent or NZB.
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer TOKEN" \
+  -F "file=@file.torrent" \
+  http://localhost:8282/api/add
+```
+
+Or with URL:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer TOKEN" \
+  -d '{"url": "magnet:?xt=..."}' \
+  http://localhost:8282/api/add
+```
+
+### DELETE /api/torrents
+
+Delete torrent(s).
+
+```bash
+curl -X DELETE \
+  -H "Authorization: Bearer TOKEN" \
+  http://localhost:8282/api/torrents?category=sonarr&hash=abc123
+```
+
+### POST /api/repair
+
+Trigger repair scan.
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer TOKEN" \
+  http://localhost:8282/api/repair
+```
+
+### GET /api/repair/jobs
+
+List repair jobs.
+
+```bash
+curl -H "Authorization: Bearer TOKEN" \
+  http://localhost:8282/api/repair/jobs
+```
+
+### POST /api/repair/jobs/{id}/process
+
+Process specific repair job.
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer TOKEN" \
+  http://localhost:8282/api/repair/jobs/JOB_ID/process
+```
+
+### GET /api/arrs
+
+List connected Arrs.
+
+```bash
+curl -H "Authorization: Bearer TOKEN" \
+  http://localhost:8282/api/arrs
+```
+
+### POST /api/refresh-token
+
+Regenerate API token.
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer OLD_TOKEN" \
+  http://localhost:8282/api/refresh-token
+```
+
+**Response:**
+```json
+{
+  "api_token": "NEW_TOKEN"
+}
+```
+
+## QBitTorrent API
+
+Decypharr implements QBitTorrent Web API for Arr compatibility.
+
+### POST /api/v2/auth/login
+
+Login (compatibility endpoint).
+
+```bash
+curl -X POST \
+  -d "username=admin&password=pass" \
+  http://localhost:8282/api/v2/auth/login
+```
+
+### GET /api/v2/torrents/info
+
+List torrents (QBit format).
+
+```bash
+curl -H "Authorization: Bearer TOKEN" \
+  http://localhost:8282/api/v2/torrents/info
+```
+
+### POST /api/v2/torrents/add
+
+Add torrent (QBit format).
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer TOKEN" \
+  -F "urls=magnet:?xt=..." \
+  -F "category=sonarr" \
+  http://localhost:8282/api/v2/torrents/add
+```
+
+### POST /api/v2/torrents/delete
+
+Delete torrents (QBit format).
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer TOKEN" \
+  -d "hashes=hash1|hash2" \
+  http://localhost:8282/api/v2/torrents/delete
+```
+
+## Browse API
+
+Hierarchical file browsing (WebDAV-style).
+
+### GET /api/browse/
+
+List root groups (`__all__`, `__bad__`, categories).
+
+### GET /api/browse/{group}
+
+List torrents in group.
+
+### GET /api/browse/{group}/{torrent}
+
+List files in torrent.
+
+### GET /api/browse/download/{torrent}/{file}
+
+Download specific file.
+
+## Error Responses
+
+```json
+{
+  "error": "Error message",
+  "code": 400
+}
+```
+
+**Status Codes:**
+- `200`: Success
+- `400`: Bad Request
+- `401`: Unauthorized (invalid token)
+- `404`: Not Found
+- `500`: Internal Server Error
+
+## Rate Limiting
+
+API respects Debrid provider rate limits configured in `config.json`. No additional API rate limiting.
+
+## Examples
+
+### Python
+
+```python
+import requests
+
+TOKEN = "your_api_token"
+BASE_URL = "http://localhost:8282"
+
+headers = {"Authorization": f"Bearer {TOKEN}"}
+
+# List torrents
+r = requests.get(f"{BASE_URL}/api/torrents", headers=headers)
+torrents = r.json()
+
+# Add torrent
+r = requests.post(
+    f"{BASE_URL}/api/add",
+    headers=headers,
+    json={"url": "magnet:?xt=..."}
+)
+```
+
+### JavaScript
+
+```javascript
+const TOKEN = 'your_api_token';
+const BASE_URL = 'http://localhost:8282';
+
+const headers = {
+  'Authorization': `Bearer ${TOKEN}`,
+  'Content-Type': 'application/json'
+};
+
+// List torrents
+fetch(`${BASE_URL}/api/torrents`, { headers })
+  .then(r => r.json())
+  .then(data => console.log(data));
+
+// Add torrent
+fetch(`${BASE_URL}/api/add`, {
+  method: 'POST',
+  headers,
+  body: JSON.stringify({ url: 'magnet:?xt=...' })
+});
+```

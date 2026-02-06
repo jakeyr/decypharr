@@ -3,13 +3,15 @@ package main
 import (
 	"context"
 	"flag"
-	"github.com/sirrobot01/decypharr/cmd/decypharr"
-	"github.com/sirrobot01/decypharr/internal/config"
 	"log"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"syscall"
+
+	"github.com/sirrobot01/decypharr/internal/config"
+
+	"github.com/sirrobot01/decypharr/cmd/decypharr"
 )
 
 func main() {
@@ -19,8 +21,11 @@ func main() {
 			debug.PrintStack()
 		}
 	}()
+
 	var configPath string
+	var pprofAddr string
 	flag.StringVar(&configPath, "config", "/data", "path to the data folder")
+	flag.StringVar(&pprofAddr, "pprof", ":6060", "pprof server address (set to empty to disable)")
 	flag.Parse()
 	config.SetConfigPath(configPath)
 	config.Get()

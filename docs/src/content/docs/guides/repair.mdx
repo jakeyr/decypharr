@@ -1,0 +1,197 @@
+---
+title: Repair Worker
+description: Automated file repair system.
+---
+
+The Repair Worker monitors your library for missing or broken files and attempts to fix them.
+
+## How It Works
+
+1. **Scan**: Checks files against provider availability
+2. **Detect**: Identifies missing segments, broken links, or expired downloads
+3. **Repair**: Re-adds torrents/NZBs or fetches new download links
+4. **Verify**: Confirms files are accessible
+
+## Configuration
+
+```json
+{
+  "repair": {
+    "enabled": true,
+    "interval": "30m",
+    "auto_process": false,
+    "workers": 2,
+    "strategy": "per_file"
+  }
+}
+```
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `enabled` | Enable automatic repair | `false` |
+| `interval` | How often to start auto-repair | `30m` |
+| `auto_process` | Auto-fix detected issues | `false` |
+| `workers` | Concurrent repair operations | `2` |
+| `strategy` | `per_file` or `per_torrent` | `per_file` |
+
+## Strategies
+
+### Per File
+
+```json
+{
+  "repair": {
+    "strategy": "per_file"
+  }
+}
+```
+
+Check each file independently. Faster for large torrents with few issues.
+
+**Use when:**
+- Large multi-file torrents
+- Only occasional file failures
+- Want faster repairs
+
+### Per Torrent
+
+```json
+{
+  "repair": {
+    "strategy": "per_torrent"
+  }
+}
+```
+
+Check all files in a torrent together. Ensures full torrent integrity.
+
+**Use when:**
+- Need complete torrent verification
+- Don't mind slower checks
+- Want comprehensive validation
+
+## Auto-Process
+
+```json
+{
+  "repair": {
+    "auto_process": true
+  }
+}
+```
+
+- `false`: Detect issues and create repair jobs (manual trigger needed)
+- `true`: Automatically fix detected issues
+
+:::caution
+`auto_process: true` automatically deletes and re-adds torrents/NZBs which may cause unexpected behavior with some Arrs or providers. Use with caution and monitor logs.
+:::
+
+## Manual Repair
+
+### Via Web UI
+
+1. Go to **Repair** page
+2. Click **Start Repair**
+3. Review detected issues
+4. Click **Repair** on specific jobs
+
+### Via API
+
+Trigger manual scan:
+
+```bash
+curl -X POST http://localhost:8282/api/repair \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+```
+
+Process specific job:
+
+```bash
+curl -X POST http://localhost:8282/api/repair/jobs/JOB_ID/process \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
+```
+
+## Per-Arr Skip Repair
+
+Disable repair for specific Arrs:
+
+```json
+{
+  "arrs": [
+    {
+      "name": "Sonarr",
+      "skip_repair": true
+    }
+  ]
+}
+```
+
+Or globally for Usenet:
+
+```json
+{
+  "usenet": {
+    "skip_repair": true
+  }
+}
+```
+
+## Repair Workflow
+
+1. Repair Worker scans library every `interval`
+2. Detects issues based on provider availability and file integrity
+3. Creates repair jobs for detected issues
+4. If `auto_process: true`, processes jobs immediately; otherwise, waits for manual trigger
+5. Repair process re-adds torrents/NZBs or fetches new links
+6. Verifies repaired files are accessible
+
+## Troubleshooting
+
+### Repair Jobs Stuck
+
+Increase `workers`:
+
+```json
+{
+  "repair": {
+    "workers": 4
+  }
+}
+```
+
+### Too Many False Positives
+
+Increase `interval` to reduce scan frequency:
+
+```json
+{
+  "repair": {
+    "interval": "1h"
+  }
+}
+```
+
+### High Resource Usage
+
+1. Set `auto_process: false`
+2. Reduce `workers`
+3. Increase `interval`
+4. Skip repair for less critical Arrs
+
+## Rate Limiting
+
+Repair operations respect Debrid provider rate limits:
+
+```json
+{
+  "debrids": [
+    {
+      "provider": "realdebrid",
+      "repair_rate_limit": "60/minute"
+    }
+  ]
+}
+```
+
+Separate from normal `rate_limit` to avoid impacting regular usage.

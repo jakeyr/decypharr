@@ -3,14 +3,16 @@ package main
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/sirrobot01/decypharr/internal/config"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	json "github.com/bytedance/sonic"
+
+	"github.com/sirrobot01/decypharr/internal/config"
 )
 
 // HealthStatus represents the status of various components
@@ -33,13 +35,11 @@ func main() {
 	flag.Parse()
 	config.SetConfigPath(configPath)
 	cfg := config.Get()
-	// Get port from environment variable or use default
+	// GetReader port from environment variable or use default
 	port := getEnvOrDefault("QBIT_PORT", cfg.Port)
 	webdavPath := ""
 	for _, debrid := range cfg.Debrids {
-		if debrid.UseWebDav {
-			webdavPath = debrid.Name
-		}
+		webdavPath = debrid.Name
 	}
 
 	// Initialize status
@@ -171,5 +171,4 @@ func checkDebridWebDAV(ctx context.Context, baseUrl, port, path string) bool {
 
 	return resp.StatusCode == http.StatusMultiStatus ||
 		resp.StatusCode == http.StatusOK
-
 }

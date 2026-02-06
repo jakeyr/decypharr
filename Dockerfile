@@ -1,5 +1,5 @@
 # Stage 1: Build binaries
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine as builder
+FROM golang:1.25-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -8,26 +8,44 @@ ARG CHANNEL=dev
 
 WORKDIR /app
 
+# Install CGO dependencies for rapidyenc and cgofuse
+RUN apk add --no-cache gcc g++ musl-dev libc-dev fuse-dev
+
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download -x
 
 COPY . .
 
-# Build main binary
+# Build main binary with CGO (for rapidyenc)
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath \
     -ldflags="-w -s -X github.com/sirrobot01/decypharr/pkg/version.Version=${VERSION} -X github.com/sirrobot01/decypharr/pkg/version.Channel=${CHANNEL}" \
     -o /decypharr
 
-# Build healthcheck (optimized)
+# Build healthcheck (no CGO needed)
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-w -s" \
     -o /healthcheck cmd/healthcheck/main.go
+
+# Stage 1.5: Download static ffprobe binary
+FROM alpine:latest AS ffprobe-extractor
+ARG TARGETARCH
+WORKDIR /tmp
+RUN apk add --no-cache curl unzip && \
+    case "$TARGETARCH" in \
+        amd64) PLATFORM="linux-64" ;; \
+        arm64) PLATFORM="linux-arm-64" ;; \
+        *) echo "Unsupported arch: $TARGETARCH" && exit 1 ;; \
+    esac && \
+    curl -L "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffprobe-6.1-${PLATFORM}.zip" -o ffprobe.zip && \
+    unzip ffprobe.zip && \
+    chmod +x ffprobe && \
+    mv ffprobe /ffprobe
 
 # Stage 2: Final image
 FROM alpine:latest
@@ -35,19 +53,19 @@ FROM alpine:latest
 ARG VERSION=0.0.0
 ARG CHANNEL=dev
 
-LABEL version = "${VERSION}-${CHANNEL}"
-LABEL org.opencontainers.image.source = "https://github.com/sirrobot01/decypharr"
-LABEL org.opencontainers.image.title = "decypharr"
-LABEL org.opencontainers.image.authors = "sirrobot01"
-LABEL org.opencontainers.image.documentation = "https://github.com/sirrobot01/decypharr/blob/main/README.md"
+LABEL version="${VERSION}-${CHANNEL}"
+LABEL org.opencontainers.image.source="https://github.com/sirrobot01/decypharr"
+LABEL org.opencontainers.image.title="decypharr"
+LABEL org.opencontainers.image.authors="sirrobot01"
+LABEL org.opencontainers.image.documentation="https://github.com/sirrobot01/decypharr/blob/main/README.md"
 
-# Install dependencies including rclone
+# Install dependencies including rclone (from binary)
 RUN apk add --no-cache fuse3 ca-certificates su-exec shadow curl unzip && \
     echo "user_allow_other" >> /etc/fuse.conf && \
     case "$(uname -m)" in \
         x86_64) ARCH=amd64 ;; \
         aarch64) ARCH=arm64 ;; \
-        armv7l) ARCH=arm ;; \
+        armv7l|armv7) ARCH=arm ;; \
         *) echo "Unsupported architecture: $(uname -m)" && exit 1 ;; \
     esac && \
     curl -O "https://downloads.rclone.org/rclone-current-linux-${ARCH}.zip" && \
@@ -60,6 +78,7 @@ RUN apk add --no-cache fuse3 ca-certificates su-exec shadow curl unzip && \
 # Copy binaries and entrypoint
 COPY --from=builder /decypharr /usr/bin/decypharr
 COPY --from=builder /healthcheck /usr/bin/healthcheck
+COPY --from=ffprobe-extractor /ffprobe /usr/bin/ffprobe
 COPY scripts/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

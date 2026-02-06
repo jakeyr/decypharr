@@ -1,28 +1,51 @@
-name: ci
+name: Deploy Docs
 on:
   push:
     branches:
       - main
+      - beta
 permissions:
   contents: write
 jobs:
   deploy:
+    name: Deploy docs (${{ matrix.channel }})
+    if: github.ref == matrix.ref
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - channel: stable
+            ref: refs/heads/main
+            destination_dir: stable
+          - channel: beta
+            ref: refs/heads/beta
+            destination_dir: beta
+    env:
+      DOCS_BASE_PREFIX: /decypharr/
     steps:
       - uses: actions/checkout@v4
-      - name: Configure Git Credentials
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-node@v4
         with:
-          python-version: 3.x
-      - run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
-      - uses: actions/cache@v4
+          node-version: 20
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - name: Install dependencies
+        working-directory: docs
+        run: npm ci
+      - name: Build docs
+        working-directory: docs
+        env:
+          PUBLIC_DOCS_CHANNEL: ${{ matrix.channel }}
+          PUBLIC_DOCS_BASE_PATH: ${{ env.DOCS_BASE_PREFIX }}
+          PUBLIC_DOCS_CHANNEL_BASE_PATH: ${{ format('{0}{1}/', env.DOCS_BASE_PREFIX, matrix.destination_dir) }}
+        run: npm run build
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
         with:
-          key: mkdocs-material-${{ env.cache_id }}
-          path: .cache
-          restore-keys: |
-            mkdocs-material-
-      - run: cd docs && pip install -r requirements.txt
-      - run: cd docs && mkdocs gh-deploy --force
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: docs/dist
+          destination_dir: ${{ matrix.destination_dir }}
+          keep_files: true
+          user_name: github-actions[bot]
+          user_email: 41898282+github-actions[bot]@users.noreply.github.com
