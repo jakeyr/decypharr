@@ -4,8 +4,24 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
+	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/sirrobot01/decypharr/pkg/usenet"
 )
+
+func (m *Manager) SetMountManager(mountMgr MountManager) {
+	m.mountManager = mountMgr
+}
+
+func (m *Manager) SetRepairManager(repairMgr RepairManager) {
+	m.repair = repairMgr
+}
+
+func (m *Manager) Repair() RepairManager {
+	return m.repair
+}
+
+
 
 // Migrator returns the migrator instance
 func (m *Manager) Migrator() *Migrator {
@@ -31,4 +47,13 @@ func (m *Manager) MountManager() MountManager {
 
 func (m *Manager) Storage() *storage.Storage {
 	return m.storage
+}
+
+func (m *Manager) Usenet() *usenet.Usenet {
+	return m.usenet
+}
+
+// GetDebridSpeedTestResult returns stored speed test result for a specific debrid provider
+func (m *Manager) GetDebridSpeedTestResult(provider string) (debridTypes.SpeedTestResult, bool) {
+	return m.debridSpeedTestResults.Load(provider)
 }

@@ -2,7 +2,6 @@ package arr
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -35,7 +34,7 @@ func (a *Arr) GetMedia(mediaId string) ([]Content, error) {
 	}
 	var data []series
 	if a.Type == Radarr {
-		return GetMovies(a, mediaId)
+		return a.GetMovies(mediaId)
 	}
 	// This is likely Sonarr
 	resp, err := a.Request(http.MethodGet, fmt.Sprintf("api/v3/series?tvdbId=%s", mediaId), nil, &data)
@@ -44,16 +43,12 @@ func (a *Arr) GetMedia(mediaId string) ([]Content, error) {
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		// This is likely Radarr
-		return GetMovies(a, mediaId)
+		return a.GetMovies(mediaId)
 	}
 	a.Type = Sonarr
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to get series: %s", resp.Status)
-	}
-
-	if err = json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("failed to decode series: %v", err)
 	}
 	// GetReader series files
 	contents := make([]Content, 0)
@@ -107,7 +102,7 @@ func (a *Arr) GetMedia(mediaId string) ([]Content, error) {
 	return contents, nil
 }
 
-func GetMovies(a *Arr, tvId string) ([]Content, error) {
+func (a *Arr) GetMovies(tvId string) ([]Content, error) {
 	var movies []Movie
 	resp, err := a.Request(http.MethodGet, fmt.Sprintf("api/v3/movie?tmdbId=%s", tvId), nil, &movies)
 	if err != nil {
@@ -157,9 +152,7 @@ func (a *Arr) searchSonarr(files []ContentFile) error {
 	// Limit concurrent goroutines
 	g.SetLimit(10)
 	for id := range ids {
-		id := id
 		g.Go(func() error {
-
 			select {
 			case <-ctx.Done():
 				return ctx.Err()

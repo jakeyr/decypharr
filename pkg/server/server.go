@@ -19,7 +19,9 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/repair"
+	"github.com/sirrobot01/decypharr/pkg/server/qbit"
+	"github.com/sirrobot01/decypharr/pkg/server/sabnzbd"
+	"github.com/sirrobot01/decypharr/pkg/server/webdav"
 )
 
 //go:embed templates/*
@@ -62,17 +64,17 @@ type RepairRequest struct {
 }
 
 type Server struct {
-	router      *chi.Mux
-	logger      zerolog.Logger
-	manager     *manager.Manager
-	repair      *repair.Repair
-	cookie      *sessions.CookieStore
-	templates   *template.Template
-	urlBase     string
-	restartFunc func()
+	router       *chi.Mux
+	logger       zerolog.Logger
+	manager      *manager.Manager
+	cookie       *sessions.CookieStore
+	templates    *template.Template
+	nzbUserAgent string
+	urlBase      string
+	restartFunc  func()
 }
 
-func New(routes map[string]http.Handler, mgr *manager.Manager, repair *repair.Repair) *Server {
+func New(mgr *manager.Manager) *Server {
 	l := logger.New("http")
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
@@ -105,11 +107,19 @@ func New(routes map[string]http.Handler, mgr *manager.Manager, repair *repair.Re
 	s := &Server{
 		logger:    l,
 		manager:   mgr,
-		repair:    repair,
 		cookie:    cookieStore,
 		templates: templates,
 		urlBase:   cfg.URLBase,
 	}
+
+	qb := qbit.New(mgr)
+	sb := sabnzbd.New(mgr)
+	wd := webdav.NewHandler(mgr)
+
+	routes := make(map[string]http.Handler)
+	routes["/api/v2"] = qb.Routes()
+	routes["/webdav"] = wd.Routes()
+	routes["/sabnzbd"] = sb.Routes()
 
 	r.Route(cfg.URLBase, func(r chi.Router) {
 		// Mount web routes
@@ -124,6 +134,7 @@ func New(routes map[string]http.Handler, mgr *manager.Manager, repair *repair.Re
 
 		r.Route("/debug", func(r chi.Router) {
 			r.Get("/stats", s.handleStats)
+			r.Post("/speedtest", s.handleSpeedTest)
 			r.Get("/logs", s.getLogs)
 			r.Get("/logs/rclone", s.getRcloneLogs)
 			r.Get("/ingests", s.handleIngests)

@@ -3,13 +3,14 @@ package main
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	json "github.com/bytedance/sonic"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 )
@@ -170,5 +171,4 @@ func checkDebridWebDAV(ctx context.Context, baseUrl, port, path string) bool {
 
 	return resp.StatusCode == http.StatusMultiStatus ||
 		resp.StatusCode == http.StatusOK
-
 }

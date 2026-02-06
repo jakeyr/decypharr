@@ -15,9 +15,14 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
+	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/sirrobot01/decypharr/pkg/manager/link"
+	"github.com/sirrobot01/decypharr/pkg/notifications"
 	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/sirrobot01/decypharr/pkg/usenet"
 	"github.com/sirrobot01/decypharr/pkg/version"
 	"golang.org/x/sync/singleflight"
 )
@@ -26,13 +31,12 @@ import (
 type Manager struct {
 	storage      *storage.Storage
 	migrator     *Migrator
+	repair       RepairManager
 	clients      *xsync.Map[string, debrid.Client]
 	arr          *arr.Storage
 	logger       zerolog.Logger
 	ready        chan struct{}
 	readyOnce    sync.Once
-	mountPaths   map[string]*FileInfo
-	firstDebrid  string
 	streamClient *http.Client
 
 	// Migration jobs tracking
@@ -47,9 +51,8 @@ type Manager struct {
 	queue        *Queue
 
 	// downloading
-	downloadSG   singleflight.Group
-	refreshSG    singleflight.Group
-	touchedLinks *xsync.Map[string, error]
+	refreshSG   singleflight.Group
+	linkService *link.Service
 
 	// repair
 	fixer *Fixer
@@ -58,17 +61,32 @@ type Manager struct {
 	customFolders *CustomFolders
 	mountManager  MountManager
 
-	startTime time.Time
+	startTime     time.Time
+	usenetTimeout time.Duration
 
 	rootInfo   *FileInfo
 	entry      *EntryCache
 	downloader *Downloader
+	usenet     *usenet.Usenet
+
+	// Debrid speed test results storage
+	debridSpeedTestResults *xsync.Map[string, debridTypes.SpeedTestResult]
+
+	// Active streams tracking
+	activeStreams *xsync.Map[string, *ActiveStream]
+
+	// NZB processing worker pool (unbounded queue)
+	nzbQueue      *nzbJobQueue
+	nzbWorkerStop chan struct{} // Signal to stop workers
+
+	// Notifications service
+	Notifications *notifications.Service
 }
 
 // New creates a new Manager instance
 func New() *Manager {
 	cfg := config.Get()
-	_logger := logger.New("torrent-manager")
+	_logger := logger.New("manager")
 
 	// Create storage directory
 	dbPath := filepath.Join(config.GetMainPath(), "decypharr.db")
@@ -79,70 +97,56 @@ func New() *Manager {
 	}
 
 	// Initialize debrid registry
-
 	ctx := context.Background()
 
 	// Optimized transport for high-performance streaming
 	// DNS resolver with caching
 	dialer := &net.Dialer{
-		Timeout:   10 * time.Second, // Fast connection timeout
+		Timeout:   5 * time.Second,  // Fast connection timeout
 		KeepAlive: 30 * time.Second, // Keep connections alive
 	}
 
 	transport := &http.Transport{
-		// TLS Configuration
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 			MinVersion:         tls.VersionTLS12,
-			// Session resumption for faster TLS handshakes
-			ClientSessionCache: tls.NewLRUClientSessionCache(100),
+			ClientSessionCache: tls.NewLRUClientSessionCache(200),
 		},
-		TLSHandshakeTimeout: 10 * time.Second, // Faster than 30s
-
-		// Connection Pooling (aggressive for streaming)
-		MaxIdleConns:        200, // Increased from 100 (support more concurrent streams)
-		MaxIdleConnsPerHost: 50,  // Increased from 20 (multiple CDN hosts per debrid)
-		MaxConnsPerHost:     100, // Limit total connections per host
-		IdleConnTimeout:     90 * time.Second,
-		DisableKeepAlives:   false,
-
-		// HTTP/2 Support (much faster for multiple requests)
-		ForceAttemptHTTP2: true,
-
-		// Timeouts
-		ResponseHeaderTimeout: 30 * time.Second, // Faster than 60s
-		ExpectContinueTimeout: 1 * time.Second,  // For large uploads
-		DisableCompression:    true,             // Already streaming compressed video
-
-		// Connection settings
-		DialContext: dialer.DialContext,
-		// Custom DialTLSContext for connection tracking (optional)
-		// Proxy support from environment
-		Proxy: http.ProxyFromEnvironment,
-
-		// Read/Write buffer sizes (optimized for streaming)
-		WriteBufferSize: 64 * 1024,  // 64KB write buffer
-		ReadBufferSize:  256 * 1024, // 256KB read buffer (faster downloads)
+		TLSHandshakeTimeout: 20 * time.Second,
+		MaxIdleConns:        400,
+		MaxIdleConnsPerHost: 200,
+		MaxConnsPerHost:     400,
+		IdleConnTimeout:     30 * time.Second,
+		DisableCompression:  true,
+		DialContext:         dialer.DialContext,
+		Proxy:              http.ProxyFromEnvironment,
+		ForceAttemptHTTP2:   false,
 	}
 
 	streamClient := &http.Client{
-		Timeout:   0, // No timeout for streaming
+		Timeout:   0,
 		Transport: transport,
 	}
 
+	usenetTimeout, err := utils.ParseDuration(cfg.Usenet.ProcessingTimeout)
+	if err != nil {
+		usenetTimeout = 10 * time.Minute
+	}
+
 	instance := &Manager{
-		storage:       strg,
-		clients:       xsync.NewMap[string, debrid.Client](),
-		logger:        _logger,
-		migrationJobs: xsync.NewMap[string, *storage.SwitcherJob](),
-		config:        cfg,
-		arr:           arr.NewStorage(),
-		queue:         newQueue(ctx, strg, 1000, cfg.RemoveStalledAfter),
-		mountPaths:    make(map[string]*FileInfo),
-		touchedLinks:  xsync.NewMap[string, error](),
-		ctx:           ctx,
-		ready:         make(chan struct{}),
-		streamClient:  streamClient,
+		storage:                strg,
+		clients:                xsync.NewMap[string, debrid.Client](),
+		logger:                 _logger,
+		migrationJobs:          xsync.NewMap[string, *storage.SwitcherJob](),
+		config:                 cfg,
+		arr:                    arr.NewStorage(),
+		queue:                  newQueue(ctx, strg, 1000, cfg.RemoveStalledAfter),
+		ctx:                    ctx,
+		ready:                  make(chan struct{}),
+		streamClient:           streamClient,
+		usenetTimeout:          usenetTimeout,
+		debridSpeedTestResults: xsync.NewMap[string, debridTypes.SpeedTestResult](),
+		activeStreams:          xsync.NewMap[string, *ActiveStream](),
 	}
 
 	instance.init()
@@ -176,7 +180,7 @@ func (m *Manager) init() {
 	// Clear debrid clients so they get recreated with new config
 	m.clients = xsync.NewMap[string, debrid.Client]()
 
-	// Reset ready channel and sync.Once for the next start
+	// Reset ready channel and syncTorrents.Once for the next start
 	m.ready = make(chan struct{})
 	m.readyOnce = sync.Once{}
 
@@ -191,7 +195,7 @@ func (m *Manager) init() {
 	// and cache it. This is actually better because different files may have different
 	// download links from different CDNs.
 
-	refreshInterval, err := time.ParseDuration(cfg.RefreshInterval)
+	refreshInterval, err := utils.ParseDuration(cfg.RefreshInterval)
 	if err != nil {
 		refreshInterval = 15 * time.Minute
 	}
@@ -200,8 +204,13 @@ func (m *Manager) init() {
 	// initialize debrid clients
 	m.initDebridClients()
 
-	// Init custom folders
+	// Initialize usenet client
+	m.initUsenet()
 
+	// Initialize link service
+	m.initLinkService()
+
+	// Init custom folders
 	m.initCustomFolders()
 
 	// Initialize fixer
@@ -211,6 +220,84 @@ func (m *Manager) init() {
 	m.setMountPaths()
 
 	m.initEntryCache()
+
+	// Initialize notifications service
+	m.Notifications = notifications.New(&m.config.Notifications, m.logger)
+}
+
+func (m *Manager) initUsenet() {
+	usenetClient, err := usenet.New()
+	if err != nil {
+		m.logger.Warn().Msg("Usenet client not configured")
+		m.usenet = nil
+		return
+	}
+	m.usenet = usenetClient
+
+	// Initialize NZB processing worker pool
+	maxConcurrentNZB := m.config.Usenet.MaxConcurrentNZB
+	if maxConcurrentNZB <= 0 {
+		maxConcurrentNZB = 2
+	}
+
+	// Create unbounded job queue
+	m.nzbQueue = newNzbJobQueue()
+	m.nzbWorkerStop = make(chan struct{})
+
+	// Start worker goroutines
+	for i := 0; i < maxConcurrentNZB; i++ {
+		go m.nzbWorker(i)
+	}
+
+	m.logger.Info().Int("workers", maxConcurrentNZB).Msg("Usenet NZB worker pool started")
+}
+
+// initLinkService initializes the link service
+func (m *Manager) initLinkService() {
+	m.linkService = link.New(
+		m.clients,
+		m.refreshTorrent,
+		m.ReinsertEntry,
+		m.streamClient,
+		m.config.Retries,
+		logger.New("link"),
+	)
+}
+
+// nzbWorker processes NZB jobs from the queue
+func (m *Manager) nzbWorker(id int) {
+	for {
+		// Check for stop signal
+		select {
+		case <-m.nzbWorkerStop:
+			m.logger.Debug().Int("worker_id", id).Msg("NZB worker stopped")
+			return
+		default:
+		}
+
+		// Pop blocks until a job is available or queue is closed
+		job, ok := m.nzbQueue.Pop()
+		if !ok {
+			m.logger.Debug().Int("worker_id", id).Msg("NZB worker exiting (queue closed)")
+			return
+		}
+
+		m.logger.Debug().
+			Int("worker_id", id).
+			Str("name", job.entry.Name).
+			Int("queued", m.nzbQueue.Len()).
+			Msg("Processing NZB job")
+
+		if err := m.processNewNzb(job.entry, job.meta, job.groups); err != nil {
+			m.logger.Error().
+				Err(err).
+				Int("worker_id", id).
+				Str("name", job.entry.Name).
+				Msg("Error processing NZB")
+			job.entry.MarkAsError(err)
+			_ = m.queue.Update(job.entry)
+		}
+	}
 }
 
 func (m *Manager) migrate() {
@@ -235,7 +322,6 @@ func (m *Manager) migrate() {
 
 	cacheFiles, ok := stats["cache_files"].(int)
 	if !ok || cacheFiles == 0 {
-		m.logger.Info().Msg("No cache files found to migrate")
 		return
 	}
 
@@ -258,8 +344,8 @@ func (m *Manager) migrate() {
 	m.logger.Info().Msg("Automatic migration started successfully")
 }
 
-func (m *Manager) sync(ctx context.Context) error {
-	// First time sync debrid -> storage
+func (m *Manager) syncTorrents(ctx context.Context) {
+	// First time syncTorrents debrid -> storage
 	m.logger.Info().
 		Int("debrids", m.clients.Size()).
 		Msg("Performing initial sync of torrents from debrid clients...")
@@ -268,7 +354,9 @@ func (m *Manager) sync(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			m.refreshTorrents(ctx, name, client)
+			if err := m.refreshTorrents(ctx, name, client); err != nil {
+				m.logger.Error().Err(err).Str("debrid", name).Msg("Initial torrent sync failed")
+			}
 			m.RefreshEntries(false)
 		}()
 		return true
@@ -276,7 +364,6 @@ func (m *Manager) sync(ctx context.Context) error {
 	wg.Wait()
 	m.logger.Info().
 		Msg("Initial sync of torrents from debrid clients completed")
-	return nil
 }
 
 // Start starts the manager and all its components
@@ -291,10 +378,14 @@ func (m *Manager) Start(ctx context.Context) error {
 	// run the migration process
 	m.migrate()
 
-	// Then perform initial sync
-	if err := m.sync(ctx); err != nil {
-		return fmt.Errorf("failed to perform initial sync: %w", err)
-	}
+	// Then perform initial syncTorrents
+	go func() {
+		m.syncTorrents(ctx)
+		// Sync NZBs
+		if err := m.syncNZBs(ctx); err != nil {
+			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
+		}
+	}()
 
 	// Start workers
 	if err := m.StartWorker(ctx); err != nil {
@@ -341,6 +432,26 @@ func (m *Manager) Stop() error {
 		}
 	}
 
+	// Close usenet connection manager if active
+	if m.usenet != nil {
+		m.logger.Info().Msg("Closing usenet connections")
+		if err := m.usenet.Close(); err != nil {
+			m.logger.Warn().Err(err).Msg("Failed to close usenet")
+		}
+	}
+
+	if m.repair != nil {
+		m.repair.Stop()
+	}
+
+	// Close storage (releases bbolt file lock)
+	if m.storage != nil {
+		m.logger.Info().Msg("Closing storage database")
+		if err := m.storage.Close(); err != nil {
+			m.logger.Warn().Err(err).Msg("Failed to close storage")
+		}
+	}
+
 	m.logger.Info().Msg("Manager stopped successfully")
 	return nil
 }
@@ -355,14 +466,18 @@ func (m *Manager) Reset() error {
 		m.logger.Warn().Err(err).Msg("Failed to stop manager during reset")
 	}
 
+	// Reopen storage database (it was closed by Stop)
+	dbPath := filepath.Join(config.GetMainPath(), "decypharr.db")
+	strg, err := storage.NewStorage(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to reopen storage after reset: %w", err)
+	}
+	m.storage = strg
+
 	// Reload configuration
 	m.init()
 	m.logger.Info().Msg("Manager reset complete")
 	return nil
-}
-
-func (m *Manager) SetMountManager(mountMgr MountManager) {
-	m.mountManager = mountMgr
 }
 
 func (m *Manager) GetStats() (map[string]interface{}, error) {
@@ -410,13 +525,13 @@ func (m *Manager) StartTime() time.Time {
 
 // CRUD operations
 
-func (m *Manager) GetEntry(torrentName string) (*storage.TorrentEntry, error) {
-	return m.storage.GetEntry(torrentName)
+func (m *Manager) GetEntryItem(torrentName string) (*storage.EntryItem, error) {
+	return m.storage.GetEntryItem(torrentName)
 }
 
-func (m *Manager) GetTorrentByFileName(torrentName, filename string) (*storage.Torrent, error) {
+func (m *Manager) GetEntryByName(torrentName, filename string) (*storage.Entry, error) {
 	// First get entry
-	entry, err := m.storage.GetEntry(torrentName)
+	entry, err := m.storage.GetEntryItem(torrentName)
 	if err != nil {
 		return nil, err
 	}
@@ -426,12 +541,10 @@ func (m *Manager) GetTorrentByFileName(torrentName, filename string) (*storage.T
 	if err != nil {
 		return nil, err
 	}
-
-	// GetReader the torrent by infohash
-	return m.GetTorrent(file.InfoHash)
+	return m.GetEntry(file.InfoHash)
 }
 
-func (m *Manager) AddOrUpdate(torrent *storage.Torrent, callback func(t *storage.Torrent)) error {
+func (m *Manager) AddOrUpdate(torrent *storage.Entry, callback func(t *storage.Entry)) error {
 	torrent.UpdatedAt = time.Now()
 	if err := m.storage.AddOrUpdate(torrent); err != nil {
 		return err
@@ -442,19 +555,15 @@ func (m *Manager) AddOrUpdate(torrent *storage.Torrent, callback func(t *storage
 	return nil
 }
 
-// GetTorrent gets a torrent by name
-func (m *Manager) GetTorrent(infohash string) (*storage.Torrent, error) {
+// GetEntry gets a torrent by name
+func (m *Manager) GetEntry(infohash string) (*storage.Entry, error) {
 	return m.storage.Get(infohash)
 }
 
-func (m *Manager) GetTorrentByHashAndCategory(infohash string) (*storage.Torrent, error) {
-	return m.storage.GetByHashAndCategory(infohash)
-}
-
-func (m *Manager) GetTorrents(filter func(*storage.Torrent) bool) ([]*storage.Torrent, error) {
+func (m *Manager) GetTorrents(filter func(*storage.Entry) bool) ([]*storage.Entry, error) {
 	// Use streaming to avoid loading all torrents into memory at once
-	var torrents []*storage.Torrent
-	err := m.storage.ForEach(func(t *storage.Torrent) error {
+	var torrents []*storage.Entry
+	err := m.storage.ForEach(func(t *storage.Entry) error {
 		if filter == nil || filter(t) {
 			torrents = append(torrents, t)
 		}
@@ -467,9 +576,9 @@ func (m *Manager) GetTorrentsCount() (int, error) {
 	return m.storage.Count()
 }
 
-// DeleteTorrent deletes a torrent by infohash
-func (m *Manager) DeleteTorrent(infohash string, removePlacements bool) error {
-	torr, err := m.GetTorrent(infohash)
+// DeleteEntry deletes a torrent by infohash
+func (m *Manager) DeleteEntry(infohash string, removePlacements bool) error {
+	torr, err := m.GetEntry(infohash)
 	if err != nil {
 		return err
 	}
@@ -488,7 +597,7 @@ func (m *Manager) DeleteTorrent(infohash string, removePlacements bool) error {
 
 func (m *Manager) DeleteTorrents(infohashes []string, removeFromDebrid bool) error {
 	for _, infohash := range infohashes {
-		if err := m.DeleteTorrent(infohash, removeFromDebrid); err != nil {
+		if err := m.DeleteEntry(infohash, removeFromDebrid); err != nil {
 			return err
 		}
 	}
@@ -512,6 +621,10 @@ func (m *Manager) trackAvailableSlots(ctx context.Context) {
 	m.clients.Range(func(name string, client debrid.Client) bool {
 		slots, err := client.GetAvailableSlots()
 		if err != nil {
+			m.logger.Warn().
+				Err(err).
+				Str("client", name).
+				Msg("Failed to get available slots from debrid client")
 			return true
 		}
 		availableSlots[name] = slots
@@ -519,7 +632,6 @@ func (m *Manager) trackAvailableSlots(ctx context.Context) {
 	})
 
 	if len(availableSlots) == 0 {
-		m.logger.Debug().Msg("No debrid clients available or no slots found")
 		return // No debrid clients or slots available, nothing to process
 	}
 

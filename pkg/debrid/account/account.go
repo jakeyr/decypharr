@@ -2,9 +2,10 @@ package account
 
 import (
 	"sync/atomic"
+	"time"
 
-	"github.com/imroc/req/v3"
 	"github.com/puzpuzpuz/xsync/v4"
+	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
@@ -16,7 +17,8 @@ type Account struct {
 	Token       string                                 `json:"token"`
 	TrafficUsed atomic.Int64                           `json:"traffic_used"` // Traffic used in bytes
 	Username    string                                 `json:"username"`     // Username for the account
-	httpClient  *req.Client
+	httpClient  *request.Client
+	Expiration  time.Time `json:"expiration"`
 
 	// Account reactivation tracking
 	DisableCount atomic.Int32 `json:"disable_count"`
@@ -29,7 +31,7 @@ func (a *Account) Equals(other *Account) bool {
 	return a.Token == other.Token && a.Debrid == other.Debrid
 }
 
-func (a *Account) Client() *req.Client {
+func (a *Account) Client() *request.Client {
 	return a.httpClient
 }
 
@@ -44,11 +46,16 @@ func (a *Account) sliceFileLink(fileLink string) string {
 	return fileLink[0:39]
 }
 
-func (a *Account) GetDownloadLink(fileLink string) (types.DownloadLink, error) {
-	slicedLink := a.sliceFileLink(fileLink)
+func (a *Account) GetDownloadLink(id string, file *types.File, fetcher LinkFetcher) (types.DownloadLink, error) {
+	slicedLink := a.sliceFileLink(file.Link)
 	dl, ok := a.links.Load(slicedLink)
 	if !ok {
-		return types.DownloadLink{}, types.ErrDownloadLinkNotFound
+		var err error
+		dl, err = fetcher(a, id, file)
+		if err != nil {
+			return dl, err
+		}
+		a.storeLink(dl)
 	}
 	if err := dl.Valid(); err != nil {
 		return types.DownloadLink{}, err
@@ -60,15 +67,35 @@ func (a *Account) storeLink(dl types.DownloadLink) {
 	slicedLink := a.sliceFileLink(dl.Link)
 	a.links.Store(slicedLink, dl)
 }
-func (a *Account) DeleteDownloadLink(fileLink string) {
-	slicedLink := a.sliceFileLink(fileLink)
+func (a *Account) DeleteLink(link types.DownloadLink, deleter LinkDeleter) error {
+	slicedLink := a.sliceFileLink(link.Link)
 	a.links.Delete(slicedLink)
+	if deleter != nil {
+		return deleter(a, link)
+	}
+	return nil
 }
 func (a *Account) ClearDownloadLinks() {
 	a.links.Clear()
 }
 func (a *Account) DownloadLinksCount() int {
 	return a.links.Size()
+}
+
+// GetRandomLink returns any cached download link for speed testing
+// Returns empty link if no links are cached
+func (a *Account) GetRandomLink() (types.DownloadLink, bool) {
+	var result types.DownloadLink
+	found := false
+	a.links.Range(func(_ string, link types.DownloadLink) bool {
+		if !link.Empty() {
+			result = link
+			found = true
+			return false // stop iteration
+		}
+		return true
+	})
+	return result, found
 }
 
 func (a *Account) StoreDownloadLinks(dls map[string]*types.DownloadLink) {

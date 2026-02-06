@@ -1,11 +1,15 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+
+	json "github.com/bytedance/sonic"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -14,6 +18,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/version"
+	"github.com/sourcegraph/conc/iter"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -28,9 +33,6 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results := make([]*manager.ImportRequest, 0)
-	errs := make([]string, 0)
-
 	arrName := r.FormValue("arr")
 	action := r.FormValue("action")
 	debridName := r.FormValue("debrid")
@@ -41,7 +43,11 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 	}
 	skipMultiSeason := r.FormValue("skipMultiSeason") == "true"
 
-	downloadUncached := r.FormValue("downloadUncached") == "true"
+	dlUncached := r.FormValue("downloadUncached") == "true"
+	var downloadUncached *bool
+	if dlUncached {
+		downloadUncached = &dlUncached
+	}
 	rmTrackerUrls := r.FormValue("rmTrackerUrls") == "true"
 
 	// Check config setting - if always remove tracker URLs is enabled, force it to true
@@ -53,98 +59,176 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 	_arr := s.manager.Arr().Get(arrName)
 	if _arr == nil {
 		// These are not found in the config. They are throwaway arrs.
-		_arr = arr.New(arrName, "", "", false, false, &downloadUncached, "", "")
+		_arr = arr.New(arrName, "", "", false, false, downloadUncached, "", "")
 	}
 
-	// Handle URLs
+	// Unified task type for all content types
+	type addTask struct {
+		taskType   string // "torrent", "nzbURL", "nzbFile"
+		magnet     *utils.Magnet
+		nzbContent []byte
+		name       string
+		source     string // for error messages
+	}
+
+	var tasks []addTask
+
+	// Collect torrent URLs
 	if urls := r.FormValue("urls"); urls != "" {
-		var urlList []string
 		for _, u := range strings.Split(urls, "\n") {
 			if trimmed := strings.TrimSpace(u); trimmed != "" {
-				urlList = append(urlList, trimmed)
+				magnet, err := utils.GetMagnetFromUrl(trimmed, rmTrackerUrls)
+				if err != nil {
+					tasks = append(tasks, addTask{
+						taskType: "error",
+						source:   fmt.Sprintf("Failed to parse URL %s: %v", trimmed, err),
+					})
+					continue
+				}
+				tasks = append(tasks, addTask{taskType: "torrent", magnet: magnet, source: fmt.Sprintf("URL %s", trimmed)})
 			}
-		}
-
-		for _, url := range urlList {
-			magnet, err := utils.GetMagnetFromUrl(url, rmTrackerUrls)
-			if err != nil {
-				errs = append(errs, fmt.Sprintf("Failed to parse URL %s: %v", url, err))
-				continue
-			}
-
-			importReq := manager.NewImportRequest(debridName, downloadFolder, magnet, _arr, config.DownloadAction(action), downloadUncached, callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
-			if err := s.manager.AddNewTorrent(ctx, importReq); err != nil {
-				s.logger.Error().Err(err).Str("url", url).Msg("Failed to add torrent")
-				errs = append(errs, fmt.Sprintf("URL %s: %v", url, err))
-				continue
-			}
-			results = append(results, importReq)
 		}
 	}
 
-	// Handle torrent/magnet files
+	// Collect torrent files
 	if files := r.MultipartForm.File["files"]; len(files) > 0 {
 		for _, fileHeader := range files {
 			file, err := fileHeader.Open()
 			if err != nil {
-				errs = append(errs, fmt.Sprintf("Failed to open file %s: %v", fileHeader.Filename, err))
+				tasks = append(tasks, addTask{
+					taskType: "error",
+					source:   fmt.Sprintf("Failed to open file %s: %v", fileHeader.Filename, err),
+				})
 				continue
 			}
 
 			magnet, err := utils.GetMagnetFromFile(file, fileHeader.Filename, rmTrackerUrls)
 			if err != nil {
-				errs = append(errs, fmt.Sprintf("Failed to parse torrent file %s: %v", fileHeader.Filename, err))
+				tasks = append(tasks, addTask{
+					taskType: "error",
+					source:   fmt.Sprintf("Failed to parse torrent file %s: %v", fileHeader.Filename, err),
+				})
 				continue
 			}
-
-			importReq := manager.NewImportRequest(debridName, downloadFolder, magnet, _arr, config.DownloadAction(action), downloadUncached, callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
-			err = s.manager.AddNewTorrent(ctx, importReq)
-			if err != nil {
-				s.logger.Error().Err(err).Str("file", fileHeader.Filename).Msg("Failed to add torrent")
-				errs = append(errs, fmt.Sprintf("File %s: %v", fileHeader.Filename, err))
-				continue
-			}
-			results = append(results, importReq)
+			tasks = append(tasks, addTask{taskType: "torrent", magnet: magnet, source: fmt.Sprintf("File %s", fileHeader.Filename), name: fileHeader.Filename})
 		}
 	}
 
-	utils.JSONResponse(w, struct {
-		Results []*manager.ImportRequest `json:"results"`
-		Errors  []string                 `json:"errors,omitempty"`
-	}{
-		Results: results,
-		Errors:  errs,
-	}, http.StatusOK)
+	// Collect NZB URLs
+	if nzbURLs := r.FormValue("nzbURLs"); nzbURLs != "" {
+		for _, u := range strings.Split(nzbURLs, "\n") {
+			if trimmed := strings.TrimSpace(u); trimmed != "" {
+				filename, content, err := utils.DownloadFile(trimmed, utils.WithHeader("User-Agent", s.nzbUserAgent))
+				if err != nil {
+					tasks = append(tasks, addTask{
+						taskType: "error",
+						source:   fmt.Sprintf("Failed to fetch NZB from URL %s: %v", trimmed, err),
+					})
+					continue
+				}
+				tasks = append(tasks, addTask{taskType: "nzb", nzbContent: content, name: filename, source: fmt.Sprintf("NZB URL %s", trimmed)})
+			}
+		}
+	}
+
+	// Collect NZB files
+	if nzbFiles := r.MultipartForm.File["nzbFiles"]; len(nzbFiles) > 0 {
+		for _, fileHeader := range nzbFiles {
+			content, err := getNZBContentFromFile(fileHeader)
+			if err != nil {
+				tasks = append(tasks, addTask{
+					taskType: "error",
+					source:   fmt.Sprintf("Failed to read NZB file %s: %v", fileHeader.Filename, err),
+				})
+				continue
+			}
+			tasks = append(tasks, addTask{taskType: "nzb", nzbContent: content, source: fmt.Sprintf("NZB File %s", fileHeader.Filename), name: fileHeader.Filename})
+		}
+	}
+
+	// Parse all tasks in parallel using iter.Map
+	mapper := iter.Mapper[addTask, *manager.ImportRequest]{
+		MaxGoroutines: min(len(tasks), 10),
+	}
+
+	results := mapper.Map(tasks, func(task *addTask) *manager.ImportRequest {
+		switch task.taskType {
+		case "error":
+			// Task already failed during collection phase
+			return &manager.ImportRequest{
+				Status: "error",
+				Error:  fmt.Sprintf("Failed to import torrent %s: %v", task.name, task.magnet),
+			}
+
+		case "torrent":
+			importReq := manager.NewTorrentRequest(debridName, downloadFolder, task.magnet, _arr, config.DownloadAction(action), downloadUncached, callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
+			if err := s.manager.AddNewTorrent(ctx, importReq); err != nil {
+				s.logger.Error().Err(err).Str("source", task.source).Msg("Failed to add torrent")
+				importReq.Error = err.Error()
+				importReq.Status = "error"
+			}
+			return importReq
+
+		case "nzb":
+			importReq := manager.NewNZBRequest(task.name, downloadFolder, task.nzbContent, _arr, config.DownloadAction(action), callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
+			nzoID, err := s.manager.AddNewNZB(ctx, importReq)
+			if err != nil {
+				s.logger.Error().Err(err).Str("source", task.source).Msg("Failed to add NZB")
+				importReq.Error = err.Error()
+				importReq.Status = "error"
+			}
+			importReq.Id = nzoID
+			return importReq
+
+		default:
+			return nil
+		}
+	})
+
+	// Filter out nil results
+	filtered := make([]*manager.ImportRequest, 0, len(results))
+	for _, r := range results {
+		if r != nil {
+			filtered = append(filtered, r)
+		}
+	}
+
+	utils.JSONResponse(w, filtered, http.StatusOK)
+}
+
+func getNZBContentFromFile(fileHeader *multipart.FileHeader) ([]byte, error) {
+	file, err := fileHeader.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// Read NZB content
+	nzbContent, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+	return nzbContent, nil
 }
 
 func (s *Server) handleRepairMedia(w http.ResponseWriter, r *http.Request) {
 	var req RepairRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	var arrs []string
-
-	// Check if this is "all" mode or traditional "arr" mode
-	if req.Mode == "all" {
-		// All mode - no arr validation needed
-		// The torrent filter is optional and handled in the repair logic
-		// We pass an empty arrs array to trigger "all" mode
-		arrs = []string{}
-	} else {
-		// Traditional arr mode
-		if req.ArrName != "" {
-			_arr := s.manager.Arr().Get(req.ArrName)
-			if _arr == nil {
-				http.Error(w, "No Arrs found to repair", http.StatusNotFound)
-				return
-			}
-			arrs = append(arrs, req.ArrName)
+	if req.ArrName != "" {
+		_arr := s.manager.Arr().Get(req.ArrName)
+		if _arr == nil {
+			http.Error(w, "No arrs found to repair", http.StatusNotFound)
+			return
 		}
+		arrs = append(arrs, req.ArrName)
 	}
 
-	if err := s.repair.AddJob(arrs, req.MediaIds, req.AutoProcess, false); err != nil {
+	if err := s.manager.Repair().AddJob(arrs, req.MediaIds, req.AutoProcess, false); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to repair: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -186,10 +270,10 @@ func (s *Server) handleGetTorrents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// GetReader all torrents
-	allTorrents := s.manager.Queue().ListFilter("", "", nil, "added_on", false)
+	allTorrents := s.manager.Queue().ListFilter("", config.ProtocolAll, "", nil, "added_on", false)
 
 	// Apply filters
-	filteredTorrents := make([]*storage.Torrent, 0)
+	filteredTorrents := make([]*storage.Entry, 0)
 	for _, t := range allTorrents {
 		// Search filter - search in name and hash
 		if search != "" {
@@ -221,7 +305,7 @@ func (s *Server) handleGetTorrents(w http.ResponseWriter, r *http.Request) {
 	offset := (page - 1) * limit
 
 	// Apply pagination
-	var paginatedTorrents []*storage.Torrent
+	var paginatedTorrents []*storage.Entry
 	if offset < total {
 		end := offset + limit
 		if end > total {
@@ -229,7 +313,7 @@ func (s *Server) handleGetTorrents(w http.ResponseWriter, r *http.Request) {
 		}
 		paginatedTorrents = filteredTorrents[offset:end]
 	} else {
-		paginatedTorrents = []*storage.Torrent{}
+		paginatedTorrents = []*storage.Entry{}
 	}
 
 	// GetReader unique categories
@@ -258,7 +342,7 @@ func (s *Server) handleGetTorrents(w http.ResponseWriter, r *http.Request) {
 }
 
 // sortQueuedTorrents sorts torrents based on the given field and order
-func sortQueuedTorrents(torrents []*storage.Torrent, sortBy, sortOrder string) {
+func sortQueuedTorrents(torrents []*storage.Entry, sortBy, sortOrder string) {
 	if len(torrents) == 0 {
 		return
 	}
@@ -288,15 +372,7 @@ func sortQueuedTorrents(torrents []*storage.Torrent, sortBy, sortOrder string) {
 		return result
 	}
 
-	// Bubble sort (for small datasets)
-	n := len(torrents)
-	for i := 0; i < n-1; i++ {
-		for j := 0; j < n-i-1; j++ {
-			if !less(j, j+1) {
-				torrents[j], torrents[j+1] = torrents[j+1], torrents[j]
-			}
-		}
-	}
+	sort.Slice(torrents, less)
 }
 
 func (s *Server) handleDeleteTorrent(w http.ResponseWriter, r *http.Request) {
@@ -306,17 +382,17 @@ func (s *Server) handleDeleteTorrent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No hash provided", http.StatusBadRequest)
 		return
 	}
-	var cleanup func(torrent *storage.Torrent) error
+	var cleanup func(torrent *storage.Entry) error
 	if removeFromDebrid {
-		cleanup = func(t *storage.Torrent) error {
+		cleanup = func(t *storage.Entry) error {
 			go s.manager.RemoveTorrentPlacements(t)
 			return nil
 		}
 	}
 
 	if err := s.manager.Queue().Delete(hash, cleanup); err != nil {
-		s.logger.Error().Err(err).Str("hash", hash).Msg("Failed to delete torrent")
-		http.Error(w, "Failed to delete torrent", http.StatusInternalServerError)
+		s.logger.Error().Err(err).Str("hash", hash).Msg("Failed to delete entry from queue")
+		http.Error(w, "Failed to delete entry from queue", http.StatusInternalServerError)
 		return
 	}
 
@@ -331,14 +407,14 @@ func (s *Server) handleDeleteTorrents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hashes := strings.Split(hashesStr, ",")
-	var cleanup func(torrent *storage.Torrent) error
+	var cleanup func(torrent *storage.Entry) error
 	if removeFromDebrid {
-		cleanup = func(t *storage.Torrent) error {
+		cleanup = func(t *storage.Entry) error {
 			go s.manager.RemoveTorrentPlacements(t)
 			return nil
 		}
 	}
-	if err := s.manager.Queue().DeleteWhere("", "", hashes, cleanup); err != nil {
+	if err := s.manager.Queue().DeleteWhere("", config.ProtocolAll, "", hashes, cleanup); err != nil {
 		s.logger.Error().Err(err).Msg("Failed to delete torrents")
 		http.Error(w, "Failed to delete torrents", http.StatusInternalServerError)
 		return
@@ -374,54 +450,53 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	// Decode the JSON body
-	var updatedConfig config.Config
-	if err := json.NewDecoder(r.Body).Decode(&updatedConfig); err != nil {
+	// Decode the incoming config update
+	var newConfig config.Config
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&newConfig); err != nil {
 		s.logger.Error().Err(err).Msg("Failed to decode config update request")
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// GetReader the current configuration
-	currentConfig := config.Get()
-	setupCompleted := currentConfig.SetupCompleted
-
-	auth := currentConfig.GetAuth()
-	currentConfig = &updatedConfig
-	currentConfig.Auth = auth
-
-	// Update Arrs through the service
-	arrStorage := s.manager.Arr()
-
-	newConfigArrs := make([]config.Arr, 0)
-	for _, a := range updatedConfig.Arrs {
-		if a.Name == "" || a.Host == "" || a.Token == "" {
-			// Skip empty or auto-generated arrs
-			continue
-		}
-		newConfigArrs = append(newConfigArrs, a)
+	// Basic validation
+	if newConfig.BindAddress == "" {
+		newConfig.BindAddress = "0.0.0.0"
 	}
-	currentConfig.Arrs = newConfigArrs
+	if newConfig.Port == "" {
+		newConfig.Port = "8282"
+	}
 
-	// Sync arrStorage with the new arrs
-	arrStorage.SyncFromConfig(currentConfig.Arrs)
+	// Preserve fields that shouldn't be overwritten by frontend
+	currentConfig := config.Get()
+	newConfig.Auth = currentConfig.GetAuth()
 
-	// Preserve setup completed status
-	currentConfig.SetupCompleted = setupCompleted
+	// Filter out empty or incomplete arrs
+	validArrs := make([]config.Arr, 0, len(newConfig.Arrs))
+	for _, a := range newConfig.Arrs {
+		if a.Name != "" && a.Host != "" && a.Token != "" {
+			validArrs = append(validArrs, a)
+		}
+	}
+	newConfig.Arrs = validArrs
 
-	if err := currentConfig.Save(); err != nil {
+	// Sync arr storage with the new configuration
+	s.manager.Arr().SyncFromConfig(newConfig.Arrs)
+
+	// Save the updated config
+	if err := newConfig.Save(); err != nil {
+		s.logger.Error().Err(err).Msg("Failed to save config")
 		http.Error(w, "Error saving config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	// Restart services asynchronously
 	go s.Restart()
 
-	// Return success
 	utils.JSONResponse(w, map[string]string{"status": "success"}, http.StatusOK)
 }
 
 func (s *Server) handleGetRepairJobs(w http.ResponseWriter, r *http.Request) {
-	utils.JSONResponse(w, s.repair.GetJobs(), http.StatusOK)
+	utils.JSONResponse(w, s.manager.Repair().GetJobs(), http.StatusOK)
 }
 
 func (s *Server) handleProcessRepairJob(w http.ResponseWriter, r *http.Request) {
@@ -430,7 +505,7 @@ func (s *Server) handleProcessRepairJob(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "No job ID provided", http.StatusBadRequest)
 		return
 	}
-	if err := s.repair.ProcessJob(id); err != nil {
+	if err := s.manager.Repair().ProcessJob(id); err != nil {
 		s.logger.Error().Err(err).Msg("Failed to process repair job")
 	}
 	w.WriteHeader(http.StatusOK)
@@ -441,7 +516,7 @@ func (s *Server) handleDeleteRepairJob(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IDs []string `json:"ids"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -450,7 +525,7 @@ func (s *Server) handleDeleteRepairJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.repair.DeleteJobs(req.IDs)
+	s.manager.Repair().DeleteJobs(req.IDs)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -460,7 +535,7 @@ func (s *Server) handleStopRepairJob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No job ID provided", http.StatusBadRequest)
 		return
 	}
-	if err := s.repair.StopJob(id); err != nil {
+	if err := s.manager.Repair().StopJob(id); err != nil {
 		s.logger.Error().Err(err).Msg("Failed to stop repair job")
 		http.Error(w, "Failed to stop job: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -488,7 +563,7 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 		Password        string `json:"password"`
 		ConfirmPassword string `json:"confirm_password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

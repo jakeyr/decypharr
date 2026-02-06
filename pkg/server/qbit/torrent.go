@@ -15,13 +15,13 @@ import (
 )
 
 // All torrent-related helpers goes here
-func (q *QBit) addMagnet(ctx context.Context, url string, arr *arr.Arr, debrid string, action config.DownloadAction, rmTrackerUrls bool) error {
+func (q *QBit) addMagnet(ctx context.Context, url string, arr *arr.Arr, debrid string, action config.DownloadAction, callbackURL string, rmTrackerUrls, skipMultiSeason bool) error {
 	magnet, err := utils.GetMagnetFromUrl(url, rmTrackerUrls)
 	if err != nil {
 		return fmt.Errorf("error parsing magnet link: %w", err)
 	}
 
-	importReq := manager.NewImportRequest(debrid, q.DownloadFolder, magnet, arr, action, false, "", manager.ImportTypeQBitTorrent, false)
+	importReq := manager.NewTorrentRequest(debrid, q.downloadFolder, magnet, arr, action, arr.DownloadUncached, callbackURL, manager.ImportTypeQBit, skipMultiSeason)
 
 	err = q.manager.AddNewTorrent(ctx, importReq)
 	if err != nil {
@@ -30,7 +30,7 @@ func (q *QBit) addMagnet(ctx context.Context, url string, arr *arr.Arr, debrid s
 	return nil
 }
 
-func (q *QBit) addTorrent(ctx context.Context, fileHeader *multipart.FileHeader, arr *arr.Arr, debrid string, action config.DownloadAction, rmTrackerUrls bool) error {
+func (q *QBit) addTorrent(ctx context.Context, fileHeader *multipart.FileHeader, arr *arr.Arr, debrid string, action config.DownloadAction, callbackURL string, rmTrackerUrls, skipMultiSeason bool) error {
 	file, _ := fileHeader.Open()
 	defer file.Close()
 	var reader io.Reader = file
@@ -38,7 +38,7 @@ func (q *QBit) addTorrent(ctx context.Context, fileHeader *multipart.FileHeader,
 	if err != nil {
 		return fmt.Errorf("error reading file: %s \n %w", fileHeader.Filename, err)
 	}
-	importReq := manager.NewImportRequest(debrid, q.DownloadFolder, magnet, arr, action, false, "", manager.ImportTypeQBitTorrent, false)
+	importReq := manager.NewTorrentRequest(debrid, q.downloadFolder, magnet, arr, action, arr.DownloadUncached, callbackURL, manager.ImportTypeQBit, skipMultiSeason)
 	err = q.manager.AddNewTorrent(ctx, importReq)
 	if err != nil {
 		return fmt.Errorf("failed to process torrent: %w", err)
@@ -46,23 +46,23 @@ func (q *QBit) addTorrent(ctx context.Context, fileHeader *multipart.FileHeader,
 	return nil
 }
 
-func (q *QBit) ResumeTorrent(t *storage.Torrent) bool {
+func (q *QBit) ResumeTorrent(t *storage.Entry) bool {
 	return true
 }
 
-func (q *QBit) PauseTorrent(t *storage.Torrent) bool {
+func (q *QBit) PauseTorrent(t *storage.Entry) bool {
 	return true
 }
 
-func (q *QBit) RefreshTorrent(t *storage.Torrent) bool {
+func (q *QBit) RefreshTorrent(t *storage.Entry) bool {
 	return true
 }
 
-func (q *QBit) GetTorrentProperties(t *storage.Torrent) *TorrentProperties {
+func (q *QBit) GetTorrentProperties(t *storage.Entry) *TorrentProperties {
 	return &TorrentProperties{
 		AdditionDate:       t.AddedOn.Unix(),
-		Comment:            "Debrid Blackhole <https://github.com/sirrobot01/decypharr>",
-		CreatedBy:          "Debrid Blackhole <https://github.com/sirrobot01/decypharr>",
+		Comment:            "Provider Blackhole <https://github.com/sirrobot01/decypharr>",
+		CreatedBy:          "Provider Blackhole <https://github.com/sirrobot01/decypharr>",
 		CreationDate:       t.AddedOn.Unix(),
 		DlLimit:            -1,
 		UpLimit:            -1,
@@ -81,7 +81,7 @@ func (q *QBit) GetTorrentProperties(t *storage.Torrent) *TorrentProperties {
 	}
 }
 
-func (q *QBit) setTorrentTags(t *storage.Torrent, tags []string) {
+func (q *QBit) setTorrentTags(t *storage.Entry, tags []string) {
 	for _, tag := range tags {
 		if tag == "" {
 			continue
@@ -96,7 +96,7 @@ func (q *QBit) setTorrentTags(t *storage.Torrent, tags []string) {
 	_ = q.manager.Queue().Update(t)
 }
 
-func (q *QBit) removeTorrentTags(t *storage.Torrent, tags []string) bool {
+func (q *QBit) removeTorrentTags(t *storage.Entry, tags []string) bool {
 	newTorrentTags := utils.RemoveItem(t.Tags, tags...)
 	q.Tags = utils.RemoveItem(q.Tags, tags...)
 	t.Tags = newTorrentTags

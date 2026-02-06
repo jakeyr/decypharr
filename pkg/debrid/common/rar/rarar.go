@@ -9,13 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
 
-	"github.com/imroc/req/v3"
+	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/retry"
 )
 
 // Constants from the Python code
@@ -65,9 +65,8 @@ func NewHttpFile(url string) (*HttpFile, error) {
 	file := &HttpFile{
 		URL:        url,
 		Position:   0,
-		client:     req.C(),
-		MaxRetries: 3,
-		RetryDelay: time.Second,
+		client:     &http.Client{Timeout: 60 * time.Second},
+		MaxRetries: config.Get().Retries,
 	}
 
 	// GetReader file size
@@ -81,37 +80,47 @@ func NewHttpFile(url string) (*HttpFile, error) {
 }
 
 func (f *HttpFile) doWithRetry(operation func() (interface{}, error)) (interface{}, error) {
-	var lastErr error
-	for attempt := 0; attempt <= f.MaxRetries; attempt++ {
-		if attempt > 0 {
-			// Jitter + exponential backoff delay
-			delay := f.RetryDelay * time.Duration(1<<uint(attempt-1))
-			jitter := time.Duration(rand.Int63n(int64(delay / 4)))
-			time.Sleep(delay + jitter)
-		}
+	var result interface{}
 
-		result, err := operation()
-		if err == nil {
-			return result, nil
-		}
+	err := retry.Do(
+		func() error {
+			var opErr error
+			result, opErr = operation()
+			if opErr == nil {
+				return nil
+			}
+			// Only retry on network errors
+			if !errors.Is(opErr, ErrNetworkError) {
+				return retry.Unrecoverable(opErr)
+			}
+			return opErr
+		},
+		retry.Attempts(uint(f.MaxRetries)+1),
+		retry.Delay(config.DefaultRetryDelay),
+		retry.MaxDelay(config.DefaultRetryDelayMax),
+		retry.DelayType(retry.BackOffDelay),
+		retry.LastErrorOnly(true),
+	)
 
-		lastErr = err
-		// Only retry on network errors
-		if !errors.Is(err, ErrNetworkError) {
-			return nil, err
-		}
+	if err != nil {
+		return nil, err
 	}
-
-	return nil, fmt.Errorf("after %d retries: %w", f.MaxRetries, lastErr)
+	return result, nil
 }
 
 // getFileSize gets the total file size from the server
 func (f *HttpFile) getFileSize() (int64, error) {
 	result, err := f.doWithRetry(func() (interface{}, error) {
-		resp, err := f.client.R().Head(f.URL)
+		req, err := http.NewRequest(http.MethodHead, f.URL, nil)
 		if err != nil {
 			return int64(0), fmt.Errorf("%w: %v", ErrNetworkError, err)
 		}
+
+		resp, err := f.client.Do(req)
+		if err != nil {
+			return int64(0), fmt.Errorf("%w: %v", ErrNetworkError, err)
+		}
+		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			return int64(0), fmt.Errorf("%w: unexpected status code: %d", ErrNetworkError, resp.StatusCode)
@@ -161,10 +170,14 @@ func (f *HttpFile) ReadAt(p []byte, off int64) (n int, err error) {
 		// Create HTTP request with Range header
 		end := off + size - 1
 
+		req, err := http.NewRequest(http.MethodGet, f.URL, nil)
+		if err != nil {
+			return 0, fmt.Errorf("%w: %v", ErrNetworkError, err)
+		}
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, end))
+
 		// Make the request
-		resp, err := f.client.R().
-			SetHeader("Range", fmt.Sprintf("bytes=%d-%d", off, end)).
-			Get(f.URL)
+		resp, err := f.client.Do(req)
 		if err != nil {
 			return 0, fmt.Errorf("%w: %v", ErrNetworkError, err)
 		}
@@ -349,7 +362,7 @@ func decodeUnicode(asciiStr string, unicodeData []byte) string {
 			flagCount = 4
 		}
 
-		// Process each 2-bit flag
+		// Parse each 2-bit flag
 		for i := 0; i < flagCount; i++ {
 			if asciiPos >= len(asciiStr) && dataPos >= len(unicodeData) {
 				break
@@ -420,33 +433,30 @@ func (r *Reader) readFiles() error {
 
 	pos += int64(headSize) // Skip archive header
 
-	// Process file entries
-	headerData, err = r.readBytes(pos, 7)
-	if err != nil {
-		// Don't stop on EOF, might be temporary network error
-		// For definitive errors, return the error
-		if !errors.Is(err, io.EOF) && !errors.Is(err, ErrNetworkError) {
-			return fmt.Errorf("error reading block header: %w", err)
-		}
-
-		// If we get EOF or network error, retry a few times
-		retryCount := 0
-		maxRetries := 3
-		retryDelay := time.Second
-
-		for retryCount < maxRetries {
-			time.Sleep(retryDelay * time.Duration(1<<uint(retryCount)))
-			retryCount++
-
-			headerData, err = r.readBytes(pos, 7)
-			if err == nil && len(headerData) >= 7 {
-				break // Successfully got data
+	// Parse file entries with retry
+	err = retry.Do(
+		func() error {
+			var readErr error
+			headerData, readErr = r.readBytes(pos, 7)
+			if readErr != nil {
+				if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, ErrNetworkError) {
+					return retry.Unrecoverable(fmt.Errorf("error reading block header: %w", readErr))
+				}
+				return readErr
 			}
-		}
-
-		if len(headerData) < 7 {
-			return fmt.Errorf("failed to read block header after retries: %w", err)
-		}
+			if len(headerData) < 7 {
+				return fmt.Errorf("incomplete block header")
+			}
+			return nil
+		},
+		retry.Attempts(4),
+		retry.Delay(config.DefaultRetryDelay),
+		retry.MaxDelay(config.DefaultRetryDelayMax),
+		retry.DelayType(retry.BackOffDelay),
+		retry.LastErrorOnly(true),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to read block header after retries: %w", err)
 	}
 
 	if len(headerData) < 7 {
@@ -463,27 +473,28 @@ func (r *Reader) readFiles() error {
 	}
 
 	if headType == BlockFile {
-		// GetReader complete header data
-		completeHeader, err := r.readBytes(pos, headSize)
-		if err != nil || len(completeHeader) < headSize {
-			// Retry logic for incomplete headers
-			retryCount := 0
-			maxRetries := 3
-			retryDelay := time.Second
-
-			for retryCount < maxRetries && (err != nil || len(completeHeader) < headSize) {
-				time.Sleep(retryDelay * time.Duration(1<<uint(retryCount)))
-				retryCount++
-
-				completeHeader, err = r.readBytes(pos, headSize)
-				if err == nil && len(completeHeader) >= headSize {
-					break // Successfully got data
+		// GetReader complete header data with retry
+		var completeHeader []byte
+		err = retry.Do(
+			func() error {
+				var readErr error
+				completeHeader, readErr = r.readBytes(pos, headSize)
+				if readErr != nil {
+					return readErr
 				}
-			}
-
-			if len(completeHeader) < headSize {
-				return fmt.Errorf("failed to read complete file header after retries: %w", err)
-			}
+				if len(completeHeader) < headSize {
+					return fmt.Errorf("incomplete header data")
+				}
+				return nil
+			},
+			retry.Attempts(4),
+			retry.Delay(config.DefaultRetryDelay),
+			retry.MaxDelay(config.DefaultRetryDelayMax),
+			retry.DelayType(retry.BackOffDelay),
+			retry.LastErrorOnly(true),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to read complete file header after retries: %w", err)
 		}
 
 		fileInfo, err := r.parseFileHeader(completeHeader, pos)
@@ -496,27 +507,28 @@ func (r *Reader) readFiles() error {
 
 		// Skip data if present
 		if headFlags&FlagHasData != 0 {
-			// Read data size
-			sizeData, err := r.readBytes(pos-4, 4)
-			if err != nil || len(sizeData) < 4 {
-				// Retry logic for data size read errors
-				retryCount := 0
-				maxRetries := 3
-				retryDelay := time.Second
-
-				for retryCount < maxRetries && (err != nil || len(sizeData) < 4) {
-					time.Sleep(retryDelay * time.Duration(1<<uint(retryCount)))
-					retryCount++
-
-					sizeData, err = r.readBytes(pos-4, 4)
-					if err == nil && len(sizeData) >= 4 {
-						break // Successfully got data
+			// Read data size with retry
+			var sizeData []byte
+			err = retry.Do(
+				func() error {
+					var readErr error
+					sizeData, readErr = r.readBytes(pos-4, 4)
+					if readErr != nil {
+						return readErr
 					}
-				}
-
-				if len(sizeData) < 4 {
-					return fmt.Errorf("failed to read data size after retries: %w", err)
-				}
+					if len(sizeData) < 4 {
+						return fmt.Errorf("incomplete size data")
+					}
+					return nil
+				},
+				retry.Attempts(4),
+				retry.Delay(config.DefaultRetryDelay),
+				retry.MaxDelay(config.DefaultRetryDelayMax),
+				retry.DelayType(retry.BackOffDelay),
+				retry.LastErrorOnly(true),
+			)
+			if err != nil {
+				return fmt.Errorf("failed to read data size after retries: %w", err)
 			}
 		}
 	}

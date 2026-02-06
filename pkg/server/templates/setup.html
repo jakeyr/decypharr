@@ -4,10 +4,6 @@
         <div class="card-body">
             <div class="flex justify-between items-center mb-4">
                 <h2 class="card-title">Setup Wizard</h2>
-                <button type="button" class="btn btn-ghost btn-sm" id="skip-setup-btn">
-                    <i class="bi bi-skip-forward"></i>
-                    Skip Setup
-                </button>
             </div>
 
             <!-- Progress indicator -->
@@ -15,9 +11,10 @@
                 <ul class="steps w-full">
                     <li class="step" data-step="1" id="step-indicator-1">Authentication</li>
                     <li class="step" data-step="2" id="step-indicator-2">Debrid Account</li>
-                    <li class="step" data-step="3" id="step-indicator-3">Download Folder</li>
-                    <li class="step" data-step="4" id="step-indicator-4">Mount System</li>
-                    <li class="step" data-step="5" id="step-indicator-5">Overview</li>
+                    <li class="step" data-step="3" id="step-indicator-3">Usenet Provider</li>
+                    <li class="step" data-step="4" id="step-indicator-4">Download Folder</li>
+                    <li class="step" data-step="5" id="step-indicator-5">Mount System</li>
+                    <li class="step" data-step="6" id="step-indicator-6">Overview</li>
                 </ul>
             </div>
 
@@ -66,10 +63,11 @@
                 </div>
             </div>
 
-            <!-- Step 2: Debrid Account -->
+            <!-- Step 2: Provider Account -->
             <div id="step-2" class="setup-step hidden">
-                <h3 class="text-xl font-semibold mb-4">Step 2: Add Debrid Account</h3>
-                <p class="text-sm text-gray-500 mb-4">Configure at least one debrid service to download and stream content.</p>
+                <h3 class="text-xl font-semibold mb-2">Step 2: Add Debrid Account (Optional)</h3>
+                <p class="text-sm text-gray-500">Configure a debrid service to download and stream cached content.</p>
+                <p class="text-xs text-warning mb-4">You must configure at least one Debrid or Usenet provider before finishing the setup.</p>
 
                 <form id="debrid-form" class="space-y-4">
                     <div>
@@ -97,13 +95,85 @@
 
                 <div class="flex justify-between mt-6">
                     <button type="button" class="btn btn-ghost" id="debrid-back-btn">Back</button>
-                    <button type="button" class="btn btn-primary" id="debrid-next-btn">Next</button>
+                    <div class="flex gap-2">
+                        <button type="button" class="btn btn-ghost" id="skip-debrid-btn">Skip Debrid</button>
+                        <button type="button" class="btn btn-primary" id="debrid-next-btn">Next</button>
+                    </div>
                 </div>
             </div>
 
-            <!-- Step 3: Download Folder -->
+            <!-- Step 3: Usenet (Optional) -->
             <div id="step-3" class="setup-step hidden">
-                <h3 class="text-xl font-semibold mb-4">Step 3: Download Folder</h3>
+                <h3 class="text-xl font-semibold mb-2">Step 3: Usenet Configuration (Optional)</h3>
+                <p class="text-sm text-gray-500">Add a usenet provider to enable NZB streaming and downloading.</p>
+                <p class="text-xs text-warning mb-4">Either this usenet provider or the previous debrid step must be configured.</p>
+
+                <form id="usenet-form" class="space-y-4">
+                    <div id="usenet-config" class="space-y-4">
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="label" for="usenet-host">
+                                    <span>Server Host</span>
+                                </label>
+                                <input type="text" class="input input-bordered w-full" id="usenet-host" name="host" placeholder="news.example.com">
+                            </div>
+                            <div>
+                                <label class="label" for="usenet-port">
+                                    <span>Port</span>
+                                </label>
+                                <input type="number" class="input input-bordered w-full" id="usenet-port" name="port" placeholder="563">
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="label" for="usenet-username">
+                                    <span>Username</span>
+                                </label>
+                                <input type="text" class="input input-bordered w-full" id="usenet-username" name="username" placeholder="Your usenet username">
+                            </div>
+                            <div>
+                                <label class="label" for="usenet-password">
+                                    <span>Password</span>
+                                </label>
+                                <input type="password" class="input input-bordered w-full" id="usenet-password" name="password" placeholder="Your usenet password">
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="label" for="usenet-max-connections">
+                                    <span>Max Connections</span>
+                                </label>
+                                <input type="number" class="input input-bordered w-full" id="usenet-max-connections" name="max_connections" placeholder="30" min="1">
+                                <label class="label">
+                                    <span class="label-text-alt">Total connections to provider</span>
+                                </label>
+                            </div>
+                            <div>
+                                <label class="label" for="usenet-max-connections-per-reader">
+                                    <span>Connections Per Stream</span>
+                                </label>
+                                <input type="number" class="input input-bordered w-full" id="usenet-max-connections-per-reader" name="reader_connections" placeholder="15" min="1">
+                                <label class="label">
+                                    <span class="label-text-alt">Higher = faster streaming</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </form>
+
+                <div class="flex justify-between mt-6">
+                    <button type="button" class="btn btn-ghost" id="usenet-back-btn">Back</button>
+                    <div class="flex gap-2">
+                        <button type="button" class="btn btn-ghost" id="skip-usenet-btn">Skip Usenet</button>
+                        <button type="button" class="btn btn-primary" id="usenet-next-btn">Next</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 4: Download Folder -->
+            <div id="step-4" class="setup-step hidden">
+                <h3 class="text-xl font-semibold mb-4">Step 4: Download Folder</h3>
                 <p class="text-sm text-gray-500 mb-4">Specify where downloaded files should be stored on your system.</p>
 
                 <form id="download-form" class="space-y-4">
@@ -124,9 +194,9 @@
                 </div>
             </div>
 
-            <!-- Step 4: Mount System -->
-            <div id="step-4" class="setup-step hidden">
-                <h3 class="text-xl font-semibold mb-4">Step 4: Mount System Configuration</h3>
+            <!-- Step 5: Mount System -->
+            <div id="step-5" class="setup-step hidden">
+                <h3 class="text-xl font-semibold mb-4">Step 5: Mount System Configuration</h3>
                 <p class="text-sm text-gray-500 mb-4">Choose and configure your preferred mount system for accessing files.</p>
 
                 <form id="mount-form" class="space-y-4">
@@ -192,9 +262,9 @@
                 </div>
             </div>
 
-            <!-- Step 5: Overview -->
-            <div id="step-5" class="setup-step hidden">
-                <h3 class="text-xl font-semibold mb-4">Step 5: Configuration Overview</h3>
+            <!-- Step 6: Overview -->
+            <div id="step-6" class="setup-step hidden">
+                <h3 class="text-xl font-semibold mb-4">Step 6: Configuration Overview</h3>
                 <p class="text-sm text-gray-500 mb-4">Review your configuration before completing the setup.</p>
 
                 <div class="space-y-4">
@@ -206,11 +276,19 @@
                         </div>
                     </div>
 
-                    <!-- Debrid Account -->
+                    <!-- Provider Account -->
                     <div class="card bg-base-200">
                         <div class="card-body p-4">
                             <h4 class="font-semibold">Debrid Account</h4>
                             <div id="overview-debrid" class="text-sm text-gray-600"></div>
+                        </div>
+                    </div>
+
+                    <!-- Usenet Configuration -->
+                    <div class="card bg-base-200">
+                        <div class="card-body p-4">
+                            <h4 class="font-semibold">Usenet Configuration</h4>
+                            <div id="overview-usenet" class="text-sm text-gray-600"></div>
                         </div>
                     </div>
 

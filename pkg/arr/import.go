@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	gourl "net/url"
-	"strconv"
 	"time"
 )
 
@@ -114,6 +113,8 @@ type ImportResponseSchema struct {
 }
 
 type ManualImportRequestFile struct {
+	DownloadId   string `json:"downloadId"`
+	FolderName   string `json:"folderName"`
 	Path         string `json:"path"`
 	SeriesId     int    `json:"seriesId"`
 	SeasonNumber int    `json:"seasonNumber"`
@@ -152,12 +153,9 @@ type ManualImportRequestSchema struct {
 	ImportMode string                    `json:"importMode"`
 }
 
-func (a *Arr) Import(path string, seriesId int, seasons []int) (io.ReadCloser, error) {
+func (a *Arr) Import(downloadID string) (io.ReadCloser, error) {
 	query := gourl.Values{}
-	query.Add("folder", path)
-	if seriesId != 0 {
-		query.Add("seriesId", strconv.Itoa(seriesId))
-	}
+	query.Add("downloadId", downloadID)
 	url := "api/v3/manualimport" + "?" + query.Encode()
 	var data []ImportResponseSchema
 	_, err := a.Request(http.MethodGet, url, nil, &data)
@@ -171,7 +169,9 @@ func (a *Arr) Import(path string, seriesId int, seasons []int) (io.ReadCloser, e
 			episodesIds = append(episodesIds, e.Id)
 		}
 		file := ManualImportRequestFile{
+			DownloadId:        downloadID,
 			Path:              d.Path,
+			FolderName:        d.FolderName,
 			SeriesId:          d.Series.Id,
 			SeasonNumber:      d.SeasonNumber,
 			EpisodeIds:        episodesIds,
@@ -186,6 +186,7 @@ func (a *Arr) Import(path string, seriesId int, seasons []int) (io.ReadCloser, e
 		}
 		files = append(files, file)
 	}
+
 	request := ManualImportRequestSchema{
 		Name:       "ManualImport",
 		Files:      files,

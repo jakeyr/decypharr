@@ -1,9 +1,7 @@
 package rar
 
 import (
-	"time"
-
-	"github.com/imroc/req/v3"
+	"net/http"
 )
 
 // File represents a file entry in a RAR archive
@@ -22,10 +20,9 @@ type File struct {
 type HttpFile struct {
 	URL        string
 	Position   int64
-	client     *req.Client
+	client     *http.Client
 	FileSize   int64
 	MaxRetries int
-	RetryDelay time.Duration
 }
 
 // Reader reads RAR3 format archives

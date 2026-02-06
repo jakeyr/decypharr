@@ -2,7 +2,7 @@ package server
 
 import (
 	"cmp"
-	"encoding/json"
+	json "github.com/bytedance/sonic"
 	"net/http"
 )
 
@@ -21,7 +21,7 @@ func (s *Server) handleTautulli(w http.ResponseWriter, r *http.Request) {
 		AutoProcess bool   `json:"autoProcess"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&payload); err != nil {
 		s.logger.Error().Err(err).Msg("Failed to parse webhook body")
 		http.Error(w, "Failed to parse webhook body: "+err.Error(), http.StatusBadRequest)
 		return
@@ -38,7 +38,7 @@ func (s *Server) handleTautulli(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mediaId := cmp.Or(payload.TmdbID, payload.TvdbID)
-	if err := s.repair.AddJob([]string{}, []string{mediaId}, payload.AutoProcess, false); err != nil {
+	if err := s.manager.Repair().AddJob([]string{}, []string{mediaId}, payload.AutoProcess, false); err != nil {
 		http.Error(w, "Failed to add job: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

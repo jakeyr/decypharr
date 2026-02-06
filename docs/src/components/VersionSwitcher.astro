@@ -1,0 +1,70 @@
+---
+import Select from '@astrojs/starlight/components/Select.astro';
+import { getCurrentVersion, getVersions } from '../data/versions';
+
+const versions = getVersions();
+const currentVersion = getCurrentVersion();
+
+const { pathname, search = '', hash = '' } = Astro.url;
+const normalizedCurrentBase = normalizeBasePath(currentVersion.href);
+const slug = deriveSlug(pathname, normalizedCurrentBase);
+const suffix = `${search}${hash}`;
+
+const options = versions.map((version) => {
+	const base = normalizeBasePath(version.href);
+	const targetPath = slug ? `${base}${slug}` : base;
+	return {
+		label: version.label,
+		value: `${targetPath}${suffix}`,
+		selected: version.id === currentVersion.id,
+	};
+});
+
+function normalizeBasePath(value) {
+	if (!value) return '/';
+	let normalized = value;
+	if (!normalized.startsWith('/')) {
+		normalized = `/${normalized}`;
+	}
+	if (!normalized.endsWith('/')) {
+		normalized = `${normalized}/`;
+	}
+	return normalized.replace(/\/{2,}/g, '/');
+}
+
+function deriveSlug(pathname, currentBase) {
+	const normalizedPath = pathname.endsWith('/') ? pathname : `${pathname}/`;
+	if (currentBase && normalizedPath.startsWith(currentBase)) {
+		const suffix = normalizedPath.slice(currentBase.length);
+		return suffix.replace(/^\/+|\/+$/g, '');
+	}
+	return normalizedPath.replace(/^\/+|\/+$/g, '');
+}
+---
+
+<div class="docs-version-switcher">
+	<Select label="Docs version" icon="document" width="8.5rem" options={options} />
+</div>
+
+<script is:inline>
+	const container = document.currentScript?.previousElementSibling;
+	const select = container?.querySelector('select');
+
+	if (select) {
+		select.addEventListener('change', (event) => {
+			const target = event.target;
+			if (target && target.value) {
+				window.location.href = target.value;
+			}
+		});
+	}
+</script>
+
+<style>
+	@layer starlight.components {
+		.docs-version-switcher {
+			display: flex;
+			align-items: center;
+		}
+	}
+</style>

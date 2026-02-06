@@ -3,7 +3,6 @@ package decypharr
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -12,18 +11,20 @@ import (
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs"
 	"github.com/sirrobot01/decypharr/pkg/mount/external"
 	"github.com/sirrobot01/decypharr/pkg/mount/rclone"
 	"github.com/sirrobot01/decypharr/pkg/repair"
 	"github.com/sirrobot01/decypharr/pkg/server"
-	"github.com/sirrobot01/decypharr/pkg/server/qbit"
 	"github.com/sirrobot01/decypharr/pkg/version"
-	"github.com/sirrobot01/decypharr/pkg/webdav"
 )
 
 func Start(ctx context.Context) error {
+	// Start the global cached time updater to reduce time.Now() syscall overhead
+	utils.StartGlobalCachedTime()
+	defer utils.StopGlobalCachedTime()
 
 	if umaskStr := os.Getenv("UMASK"); umaskStr != "" {
 		umask, err := strconv.ParseInt(umaskStr, 8, 32)
@@ -67,23 +68,16 @@ func Start(ctx context.Context) error {
 		// Initialize services
 		mountMgr := createMountManager(mgr, cfg)
 		mgr.SetMountManager(mountMgr)
-		qb := qbit.New(mgr)
-		wd := webdav.NewHandler(mgr)
 		repairMgr := repair.New(mgr)
 
-		routes := make(map[string]http.Handler)
-		routes["/api/v2"] = qb.Routes()
-		routes["/webdav"] = wd.Routes()
-
-		srv := server.New(routes, mgr, repairMgr)
+		mgr.SetRepairManager(repairMgr)
+		srv := server.New(mgr)
 
 		srv.SetRestartFunc(restartFunc)
 
 		resetFunc := func() {
 
 			config.Reset()
-			// Reset the store and services
-			qb.Reset()
 			// Stop manager to reset ready channel and cleanup resources
 			if err := mgr.Reset(); err != nil {
 				_log.Warn().Err(err).Msg("Failed to reset manager")
@@ -94,8 +88,6 @@ func Start(ctx context.Context) error {
 
 		shutdownFunc := func() {
 			config.Reset()
-			// Reset the store and services
-			qb.Reset()
 			// Stop manager to cleanup all resources including mounts
 			if err := mgr.Stop(); err != nil {
 				_log.Warn().Err(err).Msg("Failed to stop manager during shutdown")

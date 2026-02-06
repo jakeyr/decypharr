@@ -2,26 +2,30 @@ package account
 
 import (
 	"fmt"
+	"net/http"
 	"slices"
 	"sync/atomic"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/httpclient"
+	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/sourcegraph/conc/pool"
 	"go.uber.org/ratelimit"
 )
 
-type LinkFetcher func(id string, file *types.File) (types.DownloadLink, error)
+type LinkFetcher func(account *Account, id string, file *types.File) (types.DownloadLink, error)
+type LinkDeleter func(account *Account, dl types.DownloadLink) error
+type LinksFetcher func(account *Account) ([]types.DownloadLink, error)
+type SyncFunc func(account *Account) error
 
 type Manager struct {
-	debrid      string
-	current     atomic.Pointer[Account]
-	accounts    *xsync.Map[string, *Account]
-	linkFetcher LinkFetcher
-	logger      zerolog.Logger
+	debrid   string
+	current  atomic.Pointer[Account]
+	accounts *xsync.Map[string, *Account]
+	logger   zerolog.Logger
 }
 
 func NewManager(debridConf config.Debrid, downloadRL ratelimit.Limiter, logger zerolog.Logger) *Manager {
@@ -40,23 +44,24 @@ func NewManager(debridConf config.Debrid, downloadRL ratelimit.Limiter, logger z
 		headers := map[string]string{
 			"Authorization": fmt.Sprintf("Bearer %s", token),
 		}
-		httpConfig := &httpclient.Config{
-			RateLimit:  downloadRL,
-			Headers:    headers,
-			Proxy:      debridConf.Proxy,
-			MaxRetries: cfg.Retries,
-			RetryableStatus: map[int]struct{}{
-				429: {},
-				502: {},
-				447: {},
-			},
+
+		// Create request client with equivalent options
+		opts := []request.ClientOption{
+			request.WithRateLimiter(downloadRL),
+			request.WithHeaders(headers),
+			request.WithMaxRetries(cfg.Retries),
+			request.WithRetryableStatus(http.StatusTooManyRequests, http.StatusBadGateway, 447),
 		}
+		if debridConf.Proxy != "" {
+			opts = append(opts, request.WithProxy(debridConf.Proxy))
+		}
+
 		account := &Account{
 			Debrid:     debridConf.Name,
 			Token:      token,
 			Index:      idx,
 			links:      xsync.NewMap[string, types.DownloadLink](),
-			httpClient: httpclient.New(httpConfig),
+			httpClient: request.New(opts...),
 		}
 		m.accounts.Store(token, account)
 		if firstAccount == nil {
@@ -65,10 +70,6 @@ func NewManager(debridConf config.Debrid, downloadRL ratelimit.Limiter, logger z
 	}
 	m.current.Store(firstAccount)
 	return m
-}
-
-func (m *Manager) SetLinkFetcher(fetcher LinkFetcher) {
-	m.linkFetcher = fetcher
 }
 
 func (m *Manager) Active() []*Account {
@@ -110,10 +111,10 @@ func (m *Manager) Current() *Account {
 	activeAccounts := m.Active()
 	if len(activeAccounts) == 0 {
 		// No active accounts left, try to use disabled ones
-		m.logger.Warn().Str("debrid", m.debrid).Msg("No active accounts available, all accounts are disabled")
+		m.logger.Warn().Str("debrid", m.debrid).Msg("No active accounts available, all accounts are disabled, falling back to disabled accounts")
 		allAccounts := m.All()
 		if len(allAccounts) == 0 {
-			m.logger.Error().Str("debrid", m.debrid).Msg("No accounts configured")
+			m.logger.Error().Str("debrid", m.debrid).Msg("Cannot set current account, no accounts available")
 			m.current.Store(nil)
 			return nil
 		}
@@ -173,18 +174,26 @@ func (m *Manager) GetAccount(token string) (*Account, error) {
 	return acc, nil
 }
 
-func (m *Manager) GetDownloadLink(id string, file *types.File) (types.DownloadLink, error) {
+func (m *Manager) GetDownloadLink(id string, file *types.File, fetcher LinkFetcher) (types.DownloadLink, error) {
 	current := m.Current()
 	if current == nil {
 		return types.DownloadLink{}, fmt.Errorf("no active account for debrid %s", m.debrid)
 	}
-	dl, err := current.GetDownloadLink(file.Link)
+	dl, err := current.GetDownloadLink(id, file, fetcher)
 	if err != nil {
-		dl, err = m.linkFetcher(id, file)
-		if err != nil {
-			return types.DownloadLink{}, err
+		activeAccounts := m.Active()
+		for _, acc := range activeAccounts {
+			if acc.Token == current.Token {
+				continue
+			}
+			dl, err = acc.GetDownloadLink(id, file, fetcher)
+			if err != nil {
+				continue
+			} else {
+				// Successfully got link from another account. Just return it, no need to switch current account
+				return dl, nil
+			}
 		}
-		current.storeLink(dl)
 	}
 	return dl, nil
 }
@@ -200,6 +209,17 @@ func (m *Manager) StoreDownloadLink(downloadLink types.DownloadLink) {
 	account.storeLink(downloadLink)
 }
 
+func (m *Manager) DeleteDownloadLink(downloadLink types.DownloadLink, deleter LinkDeleter) error {
+	if downloadLink.Link == "" || downloadLink.Token == "" {
+		return fmt.Errorf("invalid download link")
+	}
+	account, err := m.GetAccount(downloadLink.Token)
+	if err != nil || account == nil {
+		return fmt.Errorf("account not found for download link")
+	}
+	return account.DeleteLink(downloadLink, deleter)
+}
+
 func (m *Manager) Stats() []map[string]any {
 	stats := make([]map[string]any, 0)
 
@@ -212,10 +232,61 @@ func (m *Manager) Stats() []map[string]any {
 			"token_masked": maskedToken,
 			"username":     acc.Username,
 			"traffic_used": acc.TrafficUsed.Load(),
+			"expiration":   acc.Expiration,
 			"links_count":  acc.DownloadLinksCount(),
 			"debrid":       acc.Debrid,
 		}
 		stats = append(stats, accountDetail)
 	}
 	return stats
+}
+
+func (m *Manager) RefreshLinks(fetcher LinksFetcher) error {
+	wgPool := pool.New().WithMaxGoroutines(m.accounts.Size()).WithErrors()
+	m.accounts.Range(func(key string, acc *Account) bool {
+		wgPool.Go(func() error {
+			links, err := fetcher(acc)
+			if err != nil {
+				m.logger.Error().Err(err).Str("debrid", m.debrid).Str("account_token", utils.Mask(acc.Token)).Msg("Failed to fetch download links for account")
+				return err
+			}
+			for _, dl := range links {
+				acc.storeLink(dl)
+			}
+			return nil
+		})
+		return true
+	})
+	return wgPool.Wait()
+}
+
+func (m *Manager) Sync(syncer SyncFunc) {
+	wgPool := pool.New().WithMaxGoroutines(m.accounts.Size())
+	m.accounts.Range(func(key string, acc *Account) bool {
+		wgPool.Go(func() {
+			if err := syncer(acc); err != nil {
+				m.logger.Error().Err(err).Str("debrid", m.debrid).Str("account_token", utils.Mask(acc.Token)).Msg("Failed to sync account")
+				return
+			}
+			// Check if account has expired
+			if !acc.Expiration.IsZero() && utils.Now().After(acc.Expiration) {
+				m.logger.Warn().Str("debrid", m.debrid).Str("account_token", utils.Mask(acc.Token)).Msg("Account has expired, disabling")
+				m.Disable(acc)
+			}
+			m.UpdateAccount(acc)
+		})
+		return true
+	})
+	wgPool.Wait()
+}
+
+func (m *Manager) UpdateAccount(updatedAccount *Account) {
+	if updatedAccount == nil {
+		return
+	}
+	if updatedAccount.Token == "" {
+		return
+	}
+	m.accounts.Store(updatedAccount.Token, updatedAccount)
+
 }

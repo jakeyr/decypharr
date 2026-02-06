@@ -1,5 +1,7 @@
 package config
 
+import "time"
+
 var (
 	DefaultPort     = "8282"
 	DefaultLogLevel = "info"
@@ -11,11 +13,14 @@ var (
 
 	DefaultRclonePort = "5572"
 
-	DefaultDFSChunkSize         = "8MB"
-	DefaultDFSReadAheadSize     = "16MB"
-	DefaultDFSMaxConcurrentRead = 4
-	DefaultDFSCacheExpiry       = "24h"
-	DefaultDFSDiskCacheSize     = "500MB"
+	DefaultDFSChunkSize     = "8MB"
+	DefaultDFSReadAheadSize = "128MB"
+	DefaultDFSCacheExpiry   = "24h"
+	DefaultDFSDiskCacheSize = "500MB"
 
 	DefaultAccountSyncInterval = "10m"
+	DefaultAvailableSlots      = 100 // This is for providers that does not provide available slots info
+
+	DefaultRetryDelay    = 500 * time.Millisecond
+	DefaultRetryDelayMax = 30 * time.Second
 )

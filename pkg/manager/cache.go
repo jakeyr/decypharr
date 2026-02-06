@@ -4,9 +4,12 @@ import (
 	"strings"
 
 	"github.com/puzpuzpuz/xsync/v4"
+	"golang.org/x/sync/singleflight"
 )
 
-const torrentEntryCachePrefix = "torrent::"
+const (
+	torrentEntryCachePrefix = "torrent::"
+)
 
 func (m *Manager) initEntryCache() {
 	m.entry = NewEntryCache(m)
@@ -18,8 +21,9 @@ type EntryCacheItem struct {
 }
 
 type EntryCache struct {
-	manager *Manager
-	entries *xsync.Map[string, EntryCacheItem] // key is entry name e.g __all__, __bad__, custom folder names, torrent::torrent_folder
+	manager    *Manager
+	entries    *xsync.Map[string, EntryCacheItem]
+	refreshing singleflight.Group
 }
 
 func NewEntryCache(manager *Manager) *EntryCache {
@@ -38,6 +42,13 @@ func (e *EntryCache) Get(name string) (*FileInfo, []FileInfo) {
 }
 
 func (e *EntryCache) refreshEntry(name string) EntryCacheItem {
+	result, _, _ := e.refreshing.Do(name, func() (interface{}, error) {
+		return e._refreshEntry(name), nil
+	})
+	return result.(EntryCacheItem)
+}
+
+func (e *EntryCache) _refreshEntry(name string) EntryCacheItem {
 	if strings.HasPrefix(name, torrentEntryCachePrefix) {
 		// This is a torrent folder
 		torrentName := strings.TrimPrefix(name, torrentEntryCachePrefix)
@@ -48,21 +59,26 @@ func (e *EntryCache) refreshEntry(name string) EntryCacheItem {
 		}
 		e.entries.Store(name, item)
 		return item
-	} else {
-		// This is either a __all__, __bad__ or custom folder
-		current, children := e.manager.getEntryChildren(name)
-		item := EntryCacheItem{
-			current:  current,
-			children: children,
-		}
-		e.entries.Store(name, item)
-		return item
 	}
+
+	// This is either a __all__, __bad__ or custom folder
+	current, children := e.manager.getEntryChildren(name)
+	item := EntryCacheItem{
+		current:  current,
+		children: children,
+	}
+	e.entries.Store(name, item)
+	return item
 }
 
+// Refresh triggers a cache refresh with debouncing.
+// If called multiple times rapidly, only one refresh will occur.
 func (e *EntryCache) Refresh() {
-	items := e.manager.GetEntries()
-	for _, item := range items {
-		e.refreshEntry(item.Name())
+	e.entries.Delete(EntryAllFolder)
+	e.entries.Delete(EntryBadFolder)
+	e.entries.Delete(EntryTorrentFolder)
+	e.entries.Delete(EntryNZBFolder)
+	for k := range e.manager.config.CustomFolders {
+		e.entries.Delete(k)
 	}
 }

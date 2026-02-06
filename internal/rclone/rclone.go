@@ -1,16 +1,26 @@
 package rclone
 
 import (
+	"bytes"
+	"context"
+	"encoding/base64"
 	"fmt"
+	json "github.com/bytedance/sonic"
+	"io"
+	"net/http"
 	"time"
 
-	"github.com/imroc/req/v3"
 	"github.com/rs/zerolog"
+	"github.com/sirrobot01/decypharr/internal/request"
+	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
 type Client struct {
-	client *req.Client
-	logger zerolog.Logger
+	client   *request.Client
+	baseURL  string
+	username string
+	password string
+	logger   zerolog.Logger
 }
 
 type Request struct {
@@ -19,38 +29,78 @@ type Request struct {
 }
 
 func NewClient(url, username, password string, logger zerolog.Logger) *Client {
-	client := req.C().
-		SetBaseURL(url).
-		SetTimeout(60*time.Second).
-		SetCommonHeader("Content-Type", "application/json").
-		SetCommonRetryCount(3)
+	headers := map[string]string{}
 
+	// Add basic auth header if credentials provided
 	if username != "" && password != "" {
-		client.SetCommonBasicAuth(username, password)
+		auth := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+		headers["Authorization"] = "Basic " + auth
 	}
+
+	opts := []request.ClientOption{
+		request.WithHeaders(headers),
+		request.WithTimeout(60 * time.Second),
+		request.WithMaxRetries(3),
+	}
+
 	return &Client{
-		client: client,
-		logger: logger,
+		client:   request.New(opts...),
+		baseURL:  url,
+		username: username,
+		password: password,
+		logger:   logger,
 	}
 }
 
-func (r *Client) Do(req Request, res any) error {
-	response, err := r.client.R().
-		SetBody(req.Args).
-		SetSuccessResult(res).
-		Post(req.Command)
+func (r *Client) Do(ctx context.Context, req Request, res any) error {
+	body, err := json.Marshal(req.Args)
 	if err != nil {
 		return err
 	}
-	if response.IsErrorState() {
-		return response.Err
+
+	finalURL, err := utils.JoinURL(r.baseURL, req.Command)
+	if err != nil {
+		return err
 	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, finalURL, bytes.NewBuffer(body))
+
+	if err != nil {
+		return err
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	response, err := r.client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(response.Body)
+		return fmt.Errorf("rclone error: %s - %s", response.Status, string(respBody))
+	}
+
+	if res != nil {
+		respBody, err := io.ReadAll(response.Body)
+		if err != nil {
+			return err
+		}
+		if len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, res); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
-func (r *Client) Refresh(dirs []string, fs string) error {
-	args := map[string]interface{}{
-		"fs": fs,
+func (r *Client) Refresh(ctx context.Context, dirs []string, fs string) error {
+	args := map[string]interface{}{}
+	if fs != "" {
+		args["fs"] = fs
 	}
 	for i, dir := range dirs {
 		if dir != "" {
@@ -61,88 +111,88 @@ func (r *Client) Refresh(dirs []string, fs string) error {
 			}
 		}
 	}
-	request := Request{
+	req := Request{
 		Command: "vfs/forget",
 		Args:    args,
 	}
 
-	err := r.Do(request, nil)
+	err := r.Do(ctx, req, nil)
 	if err != nil {
 		return fmt.Errorf("failed to refresh directory %s for fs %s: %w", dirs, fs, err)
 	}
-	request = Request{
+	req = Request{
 		Command: "vfs/refresh",
 		Args:    args,
 	}
-	err = r.Do(request, nil)
+	err = r.Do(ctx, req, nil)
 	if err != nil {
 		return fmt.Errorf("failed to refresh directory %s for fs %s: %w", dirs, fs, err)
 	}
 	return nil
 }
 
-func (r *Client) CheckMountHealth(fs string) error {
-	request := Request{
+func (r *Client) CheckMountHealth(ctx context.Context, fs string) error {
+	req := Request{
 		Command: "operations/list",
 		Args: map[string]interface{}{
 			"fs":     fs,
 			"remote": "",
 		},
 	}
-	err := r.Do(request, nil)
+	err := r.Do(ctx, req, nil)
 	return err
 }
 
-func (r *Client) Ping() error {
-	request := Request{Command: "core/version"}
-	err := r.Do(request, nil)
+func (r *Client) Ping(ctx context.Context) error {
+	req := Request{Command: "core/version"}
+	err := r.Do(ctx, req, nil)
 	return err
 }
 
-func (r *Client) Unmount(mountPoint string) error {
-	request := Request{
+func (r *Client) Unmount(ctx context.Context, mountPoint string) error {
+	req := Request{
 		Command: "mount/unmount",
 		Args: map[string]interface{}{
 			"mountPoint": mountPoint,
 		},
 	}
-	err := r.Do(request, nil)
+	err := r.Do(ctx, req, nil)
 	if err != nil {
 		return fmt.Errorf("failed to unmount %s via RC: %w", mountPoint, err)
 	}
 	return nil
 }
 
-func (r *Client) Mount(mountArgs map[string]interface{}) error {
-	request := Request{
+func (r *Client) Mount(ctx context.Context, mountArgs map[string]interface{}) error {
+	req := Request{
 		Command: "mount/mount",
 		Args:    mountArgs,
 	}
-	err := r.Do(request, nil)
+	err := r.Do(ctx, req, nil)
 	if err != nil {
 		return fmt.Errorf("failed to mount via RC: %w", err)
 	}
 	return nil
 }
 
-func (r *Client) CreateConfig(args map[string]interface{}) error {
-	request := Request{
+func (r *Client) CreateConfig(ctx context.Context, args map[string]interface{}) error {
+	req := Request{
 		Command: "config/create",
 		Args:    args,
 	}
-	err := r.Do(request, nil)
+	err := r.Do(ctx, req, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create config: %w", err)
 	}
 	return nil
 }
 
-func (r *Client) GetCoreStats() (*CoreStatsResponse, error) {
-	request := Request{
+func (r *Client) GetCoreStats(ctx context.Context) (*CoreStatsResponse, error) {
+	req := Request{
 		Command: "core/stats",
 	}
 	var coreStats CoreStatsResponse
-	err := r.Do(request, &coreStats)
+	err := r.Do(ctx, req, &coreStats)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get core stats: %w", err)
 	}
@@ -150,13 +200,13 @@ func (r *Client) GetCoreStats() (*CoreStatsResponse, error) {
 }
 
 // GetMemoryUsage returns memory usage statistics
-func (r *Client) GetMemoryUsage() (*MemoryStats, error) {
-	request := Request{
+func (r *Client) GetMemoryUsage(ctx context.Context) (*MemoryStats, error) {
+	req := Request{
 		Command: "core/memstats",
 	}
 
 	var memStats MemoryStats
-	err := r.Do(request, &memStats)
+	err := r.Do(ctx, req, &memStats)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get memory stats: %w", err)
 	}
@@ -164,13 +214,13 @@ func (r *Client) GetMemoryUsage() (*MemoryStats, error) {
 }
 
 // GetBandwidthStats returns bandwidth usage for all transfers
-func (r *Client) GetBandwidthStats() (*BandwidthStats, error) {
-	request := Request{
+func (r *Client) GetBandwidthStats(ctx context.Context) (*BandwidthStats, error) {
+	req := Request{
 		Command: "core/bwlimit",
 	}
 
 	var bwStats BandwidthStats
-	err := r.Do(request, &bwStats)
+	err := r.Do(ctx, req, &bwStats)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get bandwidth stats: %w", err)
 	}
@@ -178,13 +228,13 @@ func (r *Client) GetBandwidthStats() (*BandwidthStats, error) {
 }
 
 // GetVersion returns rclone version information
-func (r *Client) GetVersion() (*VersionResponse, error) {
-	request := Request{
+func (r *Client) GetVersion(ctx context.Context) (*VersionResponse, error) {
+	req := Request{
 		Command: "core/version",
 	}
 	var versionResp VersionResponse
 
-	err := r.Do(request, &versionResp)
+	err := r.Do(ctx, req, &versionResp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get version: %w", err)
 	}

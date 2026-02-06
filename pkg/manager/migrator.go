@@ -2,8 +2,8 @@ package manager
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	json "github.com/bytedance/sonic"
 	"os"
 	"path/filepath"
 	"strings"
@@ -219,7 +219,6 @@ func (m *Migrator) loadCacheTorrents() (map[string][]*storage.CachedTorrent, err
 
 	// Check if cache directory exists
 	if _, err := os.Stat(m.cacheDir); os.IsNotExist(err) {
-		m.logger.Warn().Str("path", m.cacheDir).Msg("Cache directory does not exist")
 		return torrentsByHash, nil
 	}
 
@@ -228,8 +227,6 @@ func (m *Migrator) loadCacheTorrents() (map[string][]*storage.CachedTorrent, err
 	if err != nil {
 		return nil, fmt.Errorf("failed to read cache directory: %w", err)
 	}
-
-	m.logger.Info().Int("count", len(debridDirs)).Msg("Found debrid directories")
 
 	for _, debridDir := range debridDirs {
 		if !debridDir.IsDir() {
@@ -285,8 +282,8 @@ func (m *Migrator) loadCacheTorrents() (map[string][]*storage.CachedTorrent, err
 	return torrentsByHash, nil
 }
 
-// mergeCachedTorrents merges multiple cache entries (from different debrids) into a single Torrent
-func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*storage.Torrent, error) {
+// mergeCachedTorrents merges multiple cache entries (from different debrids) into a single Entry
+func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*storage.Entry, error) {
 	if len(cachedList) == 0 {
 		return nil, fmt.Errorf("empty cached list")
 	}
@@ -300,7 +297,7 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 		other := cachedList[i]
 
 		// Check if placement already exists for this debrid+infohash combo
-		if _, exists := managed.Placements[other.Debrid]; exists {
+		if _, exists := managed.Providers[other.Debrid]; exists {
 			continue
 		}
 
@@ -319,13 +316,13 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 		}
 
 		// Create placement
-		placement := &storage.Placement{
-			Debrid:   other.Debrid,
+		placement := &storage.ProviderEntry{
+			Provider: other.Debrid,
 			ID:       other.ID,
 			AddedAt:  addedAt,
 			Status:   status,
 			Progress: other.Progress / 100.0,
-			Files:    make(map[string]*storage.PlacementFile),
+			Files:    make(map[string]*storage.ProviderFile),
 		}
 
 		// Set downloaded timestamp if complete
@@ -334,7 +331,7 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 			placement.DownloadedAt = &downloadedAt
 		}
 
-		managed.Placements[other.Debrid] = placement
+		managed.Providers[other.Debrid] = placement
 
 		// Merge files - add any files not in the base and populate placement files
 		if other.Files != nil {
@@ -352,7 +349,7 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 				}
 
 				// AddOrUpdate placement-specific file data
-				placement.Files[fileName] = &storage.PlacementFile{
+				placement.Files[fileName] = &storage.ProviderFile{
 					Id:   file.Id,
 					Link: file.Link,
 					Path: file.Path,
@@ -374,10 +371,10 @@ func (m *Migrator) mergeCachedTorrents(cachedList []*storage.CachedTorrent) (*st
 }
 
 // activateBestPlacement finds and activates the first placement that is completed
-func (m *Migrator) activateBestPlacement(torrent *storage.Torrent) {
-	for debrid, placement := range torrent.Placements {
+func (m *Migrator) activateBestPlacement(torrent *storage.Entry) {
+	for debrid, placement := range torrent.Providers {
 		if placement.Status == debridTypes.TorrentStatusDownloaded {
-			torrent.ActiveDebrid = debrid
+			torrent.ActiveProvider = debrid
 			return
 		}
 	}

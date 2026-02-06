@@ -30,14 +30,14 @@ func GetLogPath() string {
 }
 
 func New(prefix string) zerolog.Logger {
-
 	level := config.Get().LogLevel
 
 	rotatingLogFile := &lumberjack.Logger{
-		Filename: filepath.Join(GetLogPath(), "decypharr.log"),
-		MaxSize:  10,
-		MaxAge:   15,
-		Compress: true,
+		Filename:   filepath.Join(GetLogPath(), "decypharr.log"),
+		MaxSize:    10,
+		MaxAge:     15,
+		MaxBackups: 10, // Limit backup files to prevent disk fill-up
+		Compress:   true,
 	}
 
 	consoleWriter := zerolog.ConsoleWriter{

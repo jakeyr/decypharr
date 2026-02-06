@@ -24,43 +24,42 @@ const (
 	SwitcherStatusFailed     SwitcherStatus = "failed"
 	SwitcherStatusCancelled  SwitcherStatus = "cancelled"
 
-	TorrentStateDownloading TorrentState = "downloading"
-	TorrentStatePausedDL    TorrentState = "pausedDL"
-	TorrentStatePausedUP    TorrentState = "pausedUP"
-	TorrentStateError       TorrentState = "error"
+	EntryStateDownloading TorrentState = "downloading"
+	EntryStatePausedDL    TorrentState = "pausedDL"
+	EntryStatePausedUP    TorrentState = "pausedUP"
+	EntryStateError       TorrentState = "error"
 )
 
 // Common errors
 var (
-	ErrPlacementNotFound     = fmt.Errorf("placement not found")
+	ErrPlacementNotFound     = fmt.Errorf("providerEntry not found")
 	ErrAlreadyOnDebrid       = fmt.Errorf("torrent already on this debrid")
-	ErrPlacementNotCompleted = fmt.Errorf("placement not completed")
-	ErrNoActivePlacement     = fmt.Errorf("no active placement")
+	ErrPlacementNotCompleted = fmt.Errorf("providerEntry not completed")
+	ErrNoActivePlacement     = fmt.Errorf("no active providerEntry")
 )
 
-// Torrent is the unified torrent model across all debrids
-// This replaces both wire.Torrent and debrid cache CachedTorrent
-type Torrent struct {
-	// Core Identity (from debrid cache)
-	InfoHash         string `msgpack:"info_hash" json:"info_hash"`                 // Primary key - torrent hash
-	Name             string `msgpack:"name" json:"name"`                           // Torrent name
-	OriginalFilename string `msgpack:"original_filename" json:"original_filename"` // Original filename from debrid
-	Size             int64  `msgpack:"size" json:"size"`                           // Total size in bytes (for QBit compat)
-	Bytes            int64  `msgpack:"bytes" json:"bytes"`                         // Actual bytes (debrid uses this)
-	Magnet           string `msgpack:"magnet,omitempty" json:"magnet,omitempty"`   // Magnet link
+// Entry is the unified model across debrids and nzbs
+type Entry struct {
+	Protocol         config.Protocol `msgpack:"protocol" json:"protocol"`                   // torrent or nzb
+	InfoHash         string          `msgpack:"info_hash" json:"info_hash"`                 // Primary key - torrent hash
+	Name             string          `msgpack:"name" json:"name"`                           // Entry name
+	OriginalFilename string          `msgpack:"original_filename" json:"original_filename"` // Original filename from debrid
+	Size             int64           `msgpack:"size" json:"size"`                           // Total size in bytes (for QBit compat)
+	Bytes            int64           `msgpack:"bytes" json:"bytes"`                         // Actual bytes (debrid uses this)
+	Magnet           string          `msgpack:"magnet,omitempty" json:"magnet,omitempty"`   // Magnet link
 
 	IsDownloading  bool  `msgpack:"is_downloading,omitempty" json:"is_downloading,omitempty"`   // Whether currently downloading(this is for local download)
 	SizeDownloaded int64 `msgpack:"size_downloaded,omitempty" json:"size_downloaded,omitempty"` // Actual downloaded bytes
 
-	// Multi-Debrid Placement Strategy
-	ActiveDebrid string                `msgpack:"active_debrid" json:"active_debrid"` // Current active debrid
-	Placements   map[string]*Placement `msgpack:"placements" json:"placements"`       // debrid -> Placement details
+	// Multi-Provider ProviderEntry Strategy
+	ActiveProvider string                    `msgpack:"active_provider" json:"active_provider"` // Current active debrid
+	Providers      map[string]*ProviderEntry `msgpack:"providers" json:"providers"`             // debrid -> ProviderEntry details
 
 	// Files (from debrid cache)
 	Files map[string]*File `msgpack:"files" json:"files"` // filename -> File details
 
 	State TorrentState `msgpack:"state" json:"state"` // This is for QBitTorrent compatibility
-	// Debrid State (from active placement)
+	// Provider State (from active providerEntry)
 	Status   debridTypes.TorrentStatus `msgpack:"status" json:"status"`     // downloaded, downloading, queued, error
 	Progress float64                   `msgpack:"progress" json:"progress"` // Download progress (0-100)
 	Speed    int64                     `msgpack:"speed" json:"speed"`       // Download speed
@@ -95,30 +94,48 @@ type Torrent struct {
 	LastErrorTime *time.Time `msgpack:"last_error_time,omitempty" json:"last_error_time,omitempty"` // Last error time
 }
 
-// TorrentEntry These are torrents by names.
+func (e *Entry) IsTorrent() bool {
+	return e.Protocol == config.ProtocolTorrent
+}
+
+func (e *Entry) IsNZB() bool {
+	return e.Protocol == config.ProtocolNZB
+}
+
+// CanBeFixed checks if the entry can be repaired
+// TODO: Add more checks later. This will be done when we add other NZB source like TB(nzb)
+func (e *Entry) CanBeFixed() bool {
+	return e.IsTorrent()
+}
+
+func (e *Entry) CanBeMoved() bool {
+	return e.IsTorrent()
+}
+
+// EntryItem These are torrents by names.
 // This keeps track of multiple torrents with the same folder name
-// Comprises of only files(which has their respective infohashes) and placements
-type TorrentEntry struct {
+// Comprises only files(which has their respective infohashes) and placements
+type EntryItem struct {
 	Name  string           `msgpack:"name" json:"name"`   // Folder name
 	Files map[string]*File `msgpack:"files" json:"files"` // filename -> File details
 	Size  int64            `msgpack:"size" json:"size"`   // Total size of all files
 }
 
-func (e *TorrentEntry) GetFile(filename string) (*File, error) {
+func (e *EntryItem) GetFile(filename string) (*File, error) {
 	if e.Files == nil {
-		return nil, fmt.Errorf("file not found")
+		return nil, fmt.Errorf("failed to get entry item, file is nil")
 	}
 	f, exists := e.Files[filename]
 	if !exists {
-		return nil, fmt.Errorf("file not found")
+		return nil, fmt.Errorf("failed to get entry item, file does not exist")
 	}
 	if f.Deleted {
-		return nil, fmt.Errorf("file deleted")
+		return nil, fmt.Errorf("failed to get entry item, file is deleted")
 	}
 	return f, nil
 }
 
-func (e *TorrentEntry) GetSize() int64 {
+func (e *EntryItem) GetSize() int64 {
 	size := int64(0)
 	for _, f := range e.Files {
 		if !f.Deleted {
@@ -128,14 +145,14 @@ func (e *TorrentEntry) GetSize() int64 {
 	return size
 }
 
-func (e *TorrentEntry) GetFirstFile() (*File, error) {
+func (e *EntryItem) GetFirstFile() (*File, error) {
 	for _, f := range e.Files {
 		return f, nil
 	}
 	return nil, fmt.Errorf("no active files found")
 }
 
-func (e *TorrentEntry) GetActiveFiles() []*File {
+func (e *EntryItem) GetActiveFiles() []*File {
 	files := make([]*File, 0, len(e.Files))
 	for _, f := range e.Files {
 		if !f.Deleted {
@@ -150,37 +167,36 @@ type File struct {
 	Path      string    `msgpack:"path,omitempty" json:"path,omitempty"`
 	AddedOn   time.Time `msgpack:"added_on" json:"added_on"`
 	Size      int64     `msgpack:"size" json:"size"`
-	IsRar     bool      `msgpack:"is_rar" json:"is_rar"`
 	ByteRange *[2]int64 `msgpack:"byte_range,omitempty" json:"byte_range,omitempty"`
 	Deleted   bool      `msgpack:"deleted" json:"deleted"`
-	InfoHash  string    `msgpack:"infohash,omitempty" json:"infohash,omitempty"` // Which torrent this file came from
+	InfoHash  string    `msgpack:"infohash,omitempty" json:"infohash,omitempty"` // Parent infohash(might be an nzb or torrent)
 }
 
-// PlacementFile represents debrid-specific file information
-type PlacementFile struct {
+// ProviderFile represents debrid-specific file information
+type ProviderFile struct {
 	Id   string `msgpack:"id,omitempty" json:"id,omitempty"`     // For TorBox-style providers (file_id)
 	Link string `msgpack:"link,omitempty" json:"link,omitempty"` // For RealDebrid/AllDebrid-style providers (restricted URL)
 	Path string `msgpack:"path,omitempty" json:"path,omitempty"` // Path within the debrid's filesystem
 }
 
-// Placement represents a torrent's placement on a specific debrid service
-type Placement struct {
-	Debrid    string                    `msgpack:"debrid,omitempty" json:"debrid,omitempty"`
+// ProviderEntry represents a torrent's providerEntry on a specific debrid service
+type ProviderEntry struct {
+	Provider  string                    `msgpack:"provider,omitempty" json:"provider,omitempty"`
 	ID        string                    `msgpack:"debrid_id" json:"id"`                              // ID in that debrid service (e.g., L3734BKKKSBA6)
 	AddedAt   time.Time                 `msgpack:"added_at" json:"added_at"`                         // When added to this debrid
 	RemovedAt *time.Time                `msgpack:"removed_at,omitempty" json:"removed_at,omitempty"` // When removed (if archived)
-	Status    debridTypes.TorrentStatus `msgpack:"status" json:"status"`                             // Placement status
+	Status    debridTypes.TorrentStatus `msgpack:"status" json:"status"`                             // ProviderEntry status
 	Progress  float64                   `msgpack:"progress" json:"progress"`                         // Download progress on this debrid (0-100)
 
-	// Debrid-specific file information
-	Files map[string]*PlacementFile `msgpack:"files" json:"files"` // filename -> debrid-specific file info
+	// Provider-specific file information
+	Files map[string]*ProviderFile `msgpack:"files" json:"files"` // filename -> debrid-specific file info
 
 	// Cached data from debrid (avoid re-fetching)
 	DownloadedAt *time.Time `msgpack:"downloaded_at,omitempty" json:"downloaded_at,omitempty"` // When download completed on debrid
 }
 
-func (p *Placement) IsValid() bool {
-	if p.ID == "" || p.Debrid == "" {
+func (p *ProviderEntry) IsValid() bool {
+	if p.ID == "" || p.Provider == "" {
 		return false
 	}
 	// Check if all files have necessary info
@@ -192,54 +208,77 @@ func (p *Placement) IsValid() bool {
 	return true
 }
 
-// GetActivePlacement returns the active placement
-func (t *Torrent) GetActivePlacement() *Placement {
-	if t.Placements == nil || t.ActiveDebrid == "" {
+// GetActiveProvider returns the active providerEntry
+func (e *Entry) GetActiveProvider() *ProviderEntry {
+	if e.Providers == nil || e.ActiveProvider == "" {
 		return nil
 	}
-	placement, exists := t.Placements[t.ActiveDebrid]
+	providerEntry, exists := e.Providers[e.ActiveProvider]
 	if !exists {
 		return nil
 	}
-	return placement
+	return providerEntry
 }
 
-// AddPlacement adds or updates a placement for a debrid
-func (t *Torrent) AddPlacement(debridTorrent *debridTypes.Torrent) *Placement {
-	if t.Placements == nil {
-		t.Placements = make(map[string]*Placement)
+func (e *Entry) AddUsenetProvider(metadata *NZB) *ProviderEntry {
+	if e.Providers == nil {
+		e.Providers = make(map[string]*ProviderEntry)
+	}
+	providerEntry := &ProviderEntry{
+		Provider: "usenet",
+		ID:       metadata.ID,
+		AddedAt:  time.Now(),
+		Status:   debridTypes.TorrentStatusDownloaded,
+		Files:    make(map[string]*ProviderFile),
+	}
+	for _, f := range metadata.Files {
+		providerEntry.Files[f.Name] = &ProviderFile{
+			Id:   f.Name,
+			Link: path.Join(e.MountPath, f.Name),
+			Path: path.Join(e.MountPath, f.Name),
+		}
+		e.Providers[f.Name] = providerEntry
+	}
+	e.Providers["usenet"] = providerEntry
+	return providerEntry
+}
+
+// AddTorrentProvider adds or updates a providerEntry for a debrid
+func (e *Entry) AddTorrentProvider(debridTorrent *debridTypes.Torrent) *ProviderEntry {
+	if e.Providers == nil {
+		e.Providers = make(map[string]*ProviderEntry)
 	}
 
-	placement := &Placement{
-		Debrid:  debridTorrent.Debrid,
-		ID:      debridTorrent.Id,
-		AddedAt: time.Now(),
-		Status:  debridTorrent.Status,
-		Files:   make(map[string]*PlacementFile),
+	providerEntry := &ProviderEntry{
+		Provider: debridTorrent.Debrid,
+		ID:       debridTorrent.Id,
+		AddedAt:  time.Now(),
+		Status:   debridTorrent.Status,
+		Files:    make(map[string]*ProviderFile),
 	}
 
 	for _, f := range debridTorrent.GetFiles() {
-		placement.Files[f.Name] = &PlacementFile{
+		providerEntry.Files[f.Name] = &ProviderFile{
 			Id:   f.Id,
 			Link: f.Link,
 			Path: f.Path,
 		}
 	}
-	t.Placements[debridTorrent.Debrid] = placement
-	return placement
+	e.Providers[debridTorrent.Debrid] = providerEntry
+	return providerEntry
 }
 
 // ActivatePlacement switches the active debrid
-func (t *Torrent) ActivatePlacement(debridName string) error {
-	if t.Placements == nil {
+func (e *Entry) ActivatePlacement(debridName string) error {
+	if e.Providers == nil {
 		return ErrPlacementNotFound
 	}
 
-	// Find any placement with this debrid name
-	var foundPlacement *Placement
-	for _, placement := range t.Placements {
-		if placement.Debrid == debridName {
-			foundPlacement = placement
+	// Find any providerEntry with this debrid name
+	var foundPlacement *ProviderEntry
+	for _, providerEntry := range e.Providers {
+		if providerEntry.Provider == debridName {
+			foundPlacement = providerEntry
 			break
 		}
 	}
@@ -252,102 +291,97 @@ func (t *Torrent) ActivatePlacement(debridName string) error {
 		return ErrPlacementNotCompleted
 	}
 
-	t.ActiveDebrid = debridName
-	t.UpdatedAt = time.Now()
+	e.ActiveProvider = debridName
+	e.UpdatedAt = time.Now()
 
 	return nil
 }
 
-// RemovePlacement deletes a debrid torrent from the debrid itself
-func (t *Torrent) RemovePlacement(debridName string, cleanup func(placement *Placement) error) {
-	if t.Placements == nil {
+// RemoveProvider deletes a debrid torrent from the debrid itself
+func (e *Entry) RemoveProvider(debridName string, cleanup func(providerEntry *ProviderEntry) error) {
+	if e.Providers == nil {
 		return
 	}
 
 	// Find and remove all placements with this debrid name
 	var keysToDelete []string
-	var placementsToCleanup []*Placement
+	var placementsToCleanup []*ProviderEntry
 
-	for key, placement := range t.Placements {
-		if placement.Debrid == debridName {
+	for key, providerEntry := range e.Providers {
+		if providerEntry.Provider == debridName {
 			keysToDelete = append(keysToDelete, key)
-			placementsToCleanup = append(placementsToCleanup, placement)
+			placementsToCleanup = append(placementsToCleanup, providerEntry)
 		}
 	}
 
 	// Delete the placements
 	for _, key := range keysToDelete {
-		delete(t.Placements, key)
+		delete(e.Providers, key)
 	}
 
-	// If the placement is the active placement, find a new active placement
-	if t.ActiveDebrid == debridName {
-		t.SwitchToNextPlacement()
+	// If the providerEntry is the active providerEntry, find a new active providerEntry
+	if e.ActiveProvider == debridName {
+		e.SwitchToNextProvider()
 	}
 
-	// Call cleanup function for each placement if provided
+	// Call cleanup function for each providerEntry if provided
 	if cleanup != nil {
-		for _, placement := range placementsToCleanup {
-			_ = cleanup(placement)
+		for _, providerEntry := range placementsToCleanup {
+			_ = cleanup(providerEntry)
 		}
 	}
 }
 
-// HasPlacement checks if torrent exists on a debrid
-func (t *Torrent) HasPlacement(debridName string) bool {
-	if t.Placements == nil {
+// HasProvider checks if torrent exists on a debrid
+func (e *Entry) HasProvider(provider string) bool {
+	if e.Providers == nil {
 		return false
 	}
-	_, exists := t.Placements[debridName]
+	_, exists := e.Providers[provider]
 	return exists
 }
 
-// SwitchToNextPlacement switches to the next completed placement if available
-func (t *Torrent) SwitchToNextPlacement() {
-	if t.Placements == nil {
+// SwitchToNextProvider switches to the next completed providerEntry if available
+func (e *Entry) SwitchToNextProvider() {
+	if e.Providers == nil {
 		return
 	}
-	for _, placement := range t.Placements {
-		if placement.Status == debridTypes.TorrentStatusDownloaded {
-			_ = t.ActivatePlacement(placement.Debrid)
+	for _, providerEntry := range e.Providers {
+		if providerEntry.Status == debridTypes.TorrentStatusDownloaded {
+			_ = e.ActivatePlacement(providerEntry.Provider)
 			return
 		}
 	}
 }
 
-// IsCompleted checks if torrent is fully completed
-func (t *Torrent) IsCompleted() bool {
-	return t.Status == debridTypes.TorrentStatusDownloaded && t.Progress >= 1.0 && t.ContentPath != ""
-}
-
 // MarkAsCompleted marks the torrent as completed
-func (t *Torrent) MarkAsCompleted(contentPath string) {
-	t.State = TorrentStatePausedUP
-	t.IsComplete = true
-	t.Progress = 1.0
-	t.ContentPath = contentPath
+func (e *Entry) MarkAsCompleted(contentPath string) {
+	e.State = EntryStatePausedUP
+	e.IsComplete = true
+	e.Progress = 1.0
+	e.ContentPath = contentPath
 	now := time.Now()
-	t.CompletedAt = &now
-	t.UpdatedAt = now
+	e.CompletedAt = &now
+	e.UpdatedAt = now
 }
 
 // MarkAsError marks the torrent as errored
-func (t *Torrent) MarkAsError(err error) {
-	t.State = TorrentStateError
-	t.LastError = err.Error()
-	t.ErrorCount++
+func (e *Entry) MarkAsError(err error) {
+	e.State = EntryStateError
+	e.LastError = err.Error()
+	e.ErrorCount++
 	now := time.Now()
-	t.LastErrorTime = &now
-	t.UpdatedAt = now
+	e.LastErrorTime = &now
+	e.UpdatedAt = now
 }
 
-func (t *Torrent) GetFile(filename string) (*File, error) {
-	if t.Files == nil {
-		return nil, fmt.Errorf("file not found")
+func (e *Entry) GetFile(filename string) (*File, error) {
+	if e.Files == nil {
+		return nil, fmt.Errorf("failed to get entry file, files is nil")
 	}
-	f, exists := t.Files[filename]
+	f, exists := e.Files[filename]
 	if !exists {
-		return nil, fmt.Errorf("file not found")
+		return nil, fmt.Errorf("failed to get entry file, file not found")
 	}
 	if f.Deleted {
 		return nil, fmt.Errorf("file deleted")
@@ -355,58 +389,92 @@ func (t *Torrent) GetFile(filename string) (*File, error) {
 	return f, nil
 }
 
-func (t *Torrent) GetActiveFiles() []*File {
-	files := make([]*File, 0, len(t.Files))
-	for _, f := range t.Files {
+// RunChecks performs integrity checks on the Entry
+// Returns whether to refresh and any error encountered
+func (e *Entry) RunChecks() (bool, error) {
+	if e.Bad {
+		return false, fmt.Errorf("entry marked as bad")
+	}
+	activeProvider := e.GetActiveProvider()
+	if activeProvider == nil {
+		return true, fmt.Errorf("no active providerEntry") // need to refresh
+	}
+	if activeProvider.Status != debridTypes.TorrentStatusDownloaded {
+		return true, fmt.Errorf("active providerEntry not completed") // need to refresh
+	}
+
+	if len(activeProvider.Files) == 0 {
+		return true, fmt.Errorf("no files in active providerEntry") // need to refresh
+	}
+
+	// Then check all the files exists and files not deleted have links
+	for _, f := range e.Files {
+		if f.Deleted {
+			continue
+		}
+		pf, exists := activeProvider.Files[f.Name]
+		if !exists {
+			return true, fmt.Errorf("file %s missing in active providerEntry", f.Name) // need to refresh
+		}
+		if pf.Link == "" {
+			return true, fmt.Errorf("file %s has no link in active providerEntry", f.Name) // need to refresh
+		}
+	}
+	return false, nil
+}
+
+func (e *Entry) GetActiveFiles() []*File {
+	files := make([]*File, 0, len(e.Files))
+	for _, f := range e.Files {
 		if !f.Deleted {
 			files = append(files, f)
 		}
 	}
 	return files
 }
-func (t *Torrent) GetFolder() string {
+func (e *Entry) GetFolder() string {
 	// CHeck if the mount folder is empty or .
-	return GetTorrentFolder(config.Get().FolderNaming, t)
+	return GetTorrentFolder(config.Get().FolderNaming, e)
 }
 
 // IsValid checks if the torrent has essential fields
-func (t *Torrent) IsValid() bool {
+func (e *Entry) IsValid() bool {
 	// Check infohash
-	if t.InfoHash == "" || t.Name == "" {
+	if e.InfoHash == "" || e.Name == "" {
 		return false
 	}
-	// Check if there is at least one placement
-	if len(t.Placements) == 0 {
+	// Check if there is at least one providerEntry
+	if len(e.Providers) == 0 {
 		return false
 	}
-	activePlacement := t.GetActivePlacement()
+	activePlacement := e.GetActiveProvider()
 	if activePlacement == nil {
 		return false
 	}
-	// Check validity of active placement
-	if activePlacement.ID == "" || activePlacement.Debrid == "" {
+	// Check validity of active providerEntry
+	if activePlacement.ID == "" || activePlacement.Provider == "" {
 		return false
 	}
 	return activePlacement.IsValid()
 }
 
-func (t *Torrent) SymlinkPath() string {
-	return filepath.Join(t.SavePath, utils.RemoveExtension(t.Name))
+func (e *Entry) SymlinkPath() string {
+	return filepath.Join(e.SavePath, utils.RemoveExtension(e.Name))
 }
 
 // SwitcherJob tracks the progress of a migration operation
 type SwitcherJob struct {
-	ID           string         `msgpack:"id" json:"id"`
-	InfoHash     string         `msgpack:"infohash" json:"info_hash"`                            // Torrent being migrated
-	SourceDebrid string         `msgpack:"source_debrid" json:"source_debrid"`                   // Source debrid
-	TargetDebrid string         `msgpack:"target_debrid" json:"target_debrid"`                   // Target debrid
-	Status       SwitcherStatus `msgpack:"status" json:"status"`                                 // Job status
-	Progress     float64        `msgpack:"progress" json:"progress"`                             // Progress (0-100)
-	Error        string         `msgpack:"error,omitempty" json:"error,omitempty"`               // Error message if failed
-	CreatedAt    time.Time      `msgpack:"created_at" json:"created_at"`                         // When job started
-	CompletedAt  *time.Time     `msgpack:"completed_at,omitempty" json:"completed_at,omitempty"` // When completed
-	KeepOld      bool           `msgpack:"keep_old" json:"keep_old"`                             // Whether to keep old placement(or remove it)
-	WaitComplete bool           `msgpack:"wait_complete" json:"wait_complete"`                   // Whether to wait for download
+	ID             string         `msgpack:"id" json:"id"`
+	InfoHash       string         `msgpack:"infohash" json:"info_hash"`                            // Entry being migrated
+	SourceProvider string         `msgpack:"source_provider" json:"source_provider"`               // Source provider
+	TargetProvider string         `msgpack:"target_provider" json:"target_provider"`               // Target provider
+	Status         SwitcherStatus `msgpack:"status" json:"status"`                                 // Job status
+	Progress       float64        `msgpack:"progress" json:"progress"`                             // Progress (0-100)
+	Error          string         `msgpack:"error,omitempty" json:"error,omitempty"`               // Error message if failed
+	CreatedAt      time.Time      `msgpack:"created_at" json:"created_at"`                         // When job started
+	CompletedAt    *time.Time     `msgpack:"completed_at,omitempty" json:"completed_at,omitempty"` // When completed
+	KeepOld        bool           `msgpack:"keep_old" json:"keep_old"`                             // Whether to keep old providerEntry(or remove it)
+	WaitComplete   bool           `msgpack:"wait_complete" json:"wait_complete"`                   // Whether to wait for download
 }
 
 // SystemMigrationStatus tracks overall system migration from legacy to unified
@@ -423,8 +491,8 @@ type SystemMigrationStatus struct {
 // CachedTorrent represents the debrid cache JSON format for migration
 type CachedTorrent struct {
 	ID               string                       `json:"id"`                // Debrid torrent ID
-	InfoHash         string                       `json:"info_hash"`         // Torrent info hash
-	Name             string                       `json:"name"`              // Torrent name
+	InfoHash         string                       `json:"info_hash"`         // Entry info hash
+	Name             string                       `json:"name"`              // Entry name
 	Folder           string                       `json:"folder"`            // Folder name
 	Filename         string                       `json:"filename"`          // Filename
 	OriginalFilename string                       `json:"original_filename"` // Original filename
@@ -448,7 +516,7 @@ type CachedTorrent struct {
 }
 
 // ToManagedTorrent converts a cached torrent to managed format
-func (ct *CachedTorrent) ToManagedTorrent() *Torrent {
+func (ct *CachedTorrent) ToManagedTorrent() *Entry {
 	now := time.Now()
 	// Parse timestamps
 	var addedOn, createdAt time.Time
@@ -468,15 +536,16 @@ func (ct *CachedTorrent) ToManagedTorrent() *Torrent {
 		category = ct.Arr.Name
 	}
 
-	mt := &Torrent{
+	mt := &Entry{
+		Protocol:         config.ProtocolTorrent,
 		InfoHash:         ct.InfoHash,
 		Name:             ct.Name,
 		OriginalFilename: ct.OriginalFilename,
 		Size:             ct.Size,
 		Bytes:            ct.Bytes,
 		Magnet:           "",
-		ActiveDebrid:     ct.Debrid,
-		Placements:       make(map[string]*Placement),
+		ActiveProvider:   ct.Debrid,
+		Providers:        make(map[string]*ProviderEntry),
 		Status:           debridTypes.TorrentStatus(ct.Status),
 		Progress:         ct.Progress,
 		Speed:            ct.Speed,
@@ -496,7 +565,6 @@ func (ct *CachedTorrent) ToManagedTorrent() *Torrent {
 		mt.Files[name] = &File{
 			Name:      f.Name,
 			Size:      f.Size,
-			IsRar:     f.IsRar,
 			ByteRange: f.ByteRange,
 			InfoHash:  ct.InfoHash, // Track which torrent this file came from
 			Deleted:   f.Deleted,
@@ -511,34 +579,34 @@ func (ct *CachedTorrent) ToManagedTorrent() *Torrent {
 		}
 	}
 
-	// Create placement for this debrid
+	// Create providerEntry for this debrid
 	if ct.Debrid != "" && ct.ID != "" {
 		var downloadedAt *time.Time
 		if ct.IsComplete {
 			downloadedAt = &addedOn
 		}
 
-		placement := &Placement{
-			Debrid:       ct.Debrid,
+		providerEntry := &ProviderEntry{
+			Provider:     ct.Debrid,
 			ID:           ct.ID,
 			AddedAt:      addedOn,
 			Status:       debridTypes.TorrentStatus(ct.Status),
 			Progress:     ct.Progress,
 			DownloadedAt: downloadedAt,
-			Files:        make(map[string]*PlacementFile),
+			Files:        make(map[string]*ProviderFile),
 		}
 
-		// Populate placement files from cached torrent
+		// Populate providerEntry files from cached torrent
 		for _, f := range ct.Files {
-			placement.Files[f.Name] = &PlacementFile{
+			providerEntry.Files[f.Name] = &ProviderFile{
 				Id:   f.Id,
 				Link: f.Link,
 				Path: f.Path,
 			}
 		}
 
-		// Use composite key for placement
-		mt.Placements[ct.Debrid] = placement
+		// Use composite key for providerEntry
+		mt.Providers[ct.Debrid] = providerEntry
 	}
 
 	// Set completion timestamp if complete
@@ -550,21 +618,21 @@ func (ct *CachedTorrent) ToManagedTorrent() *Torrent {
 }
 
 // GetTorrentFolder returns the folder name for a torrent by debrid ID
-func GetTorrentFolder(folderNaming config.WebDavFolderNaming, torrent *Torrent) string {
+func GetTorrentFolder(folderNaming config.WebDavFolderNaming, entry *Entry) string {
 	var folder string
 	switch folderNaming {
 	case config.WebDavUseFileName:
-		folder = path.Clean(torrent.Name)
+		folder = path.Clean(entry.Name)
 	case config.WebDavUseOriginalName:
-		folder = path.Clean(torrent.OriginalFilename)
+		folder = path.Clean(entry.OriginalFilename)
 	case config.WebDavUseFileNameNoExt:
-		folder = path.Clean(utils.RemoveExtension(torrent.Name))
+		folder = path.Clean(utils.RemoveExtension(entry.Name))
 	case config.WebDavUseOriginalNameNoExt:
-		folder = path.Clean(utils.RemoveExtension(torrent.OriginalFilename))
+		folder = path.Clean(utils.RemoveExtension(entry.OriginalFilename))
 	case config.WebdavUseHash:
-		folder = torrent.InfoHash
+		folder = entry.InfoHash
 	default:
-		folder = path.Clean(torrent.Name)
+		folder = path.Clean(entry.Name)
 	}
 	return folder
 }

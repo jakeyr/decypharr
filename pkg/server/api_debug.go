@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	json "github.com/bytedance/sonic"
 	"net/http"
 	"runtime"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
 func (s *Server) handleIngests(w http.ResponseWriter, r *http.Request) {
@@ -26,7 +28,7 @@ func (s *Server) handleIngests(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleIngestsByDebrid(w http.ResponseWriter, r *http.Request) {
 	debridName := chi.URLParam(r, "debrid")
 	if debridName == "" {
-		http.Error(w, "Debrid name is required", http.StatusBadRequest)
+		http.Error(w, "Provider name is required", http.StatusBadRequest)
 		return
 	}
 	ingests, err := s.manager.GetIngestsByDebrid(debridName)
@@ -105,6 +107,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 		debridStat.Library = libraryStat
 		debridStat.Accounts = client.AccountManager().Stats()
+
+		// Include stored speed test result if available
+		if speedTestResult, ok := s.manager.GetDebridSpeedTestResult(debridName); ok {
+			debridStat.SpeedTestResult = &speedTestResult
+		}
+
 		debridStats = append(debridStats, debridStat)
 		return true
 	})
@@ -146,5 +154,90 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Add usenet stats if available
+	if s.manager.HasUsenet() {
+		usenetStats := s.manager.UsenetStats()
+		if usenetStats != nil {
+			stats["usenet"] = usenetStats
+		}
+	}
+
+	// Add active streams
+	activeStreams := s.manager.GetActiveStreams()
+	stats["active_streams"] = map[string]interface{}{
+		"count":   len(activeStreams),
+		"streams": activeStreams,
+	}
+
+	// Add storage stats
+	storageStats := s.manager.Storage().Stats()
+	stats["storage"] = map[string]interface{}{
+		"db_size":       storageStats["total_size"],
+		"total_entries": torrentsCounts,
+	}
+
+	// Add queue stats
+	queue := s.manager.Queue()
+	stats["queue"] = map[string]interface{}{
+		"pending": queue.RequestsSize(),
+	}
+
+	// Add arr instances stats
+	arrs := s.manager.Arr().GetAll()
+	arrNames := make([]string, 0, len(arrs))
+	for _, a := range arrs {
+		arrNames = append(arrNames, a.Name)
+	}
+	stats["arrs"] = map[string]interface{}{
+		"count": len(arrs),
+		"names": arrNames,
+	}
+
+	// Add repair stats
+	repairJobs := s.manager.Repair().GetJobs()
+	activeRepairJobs := 0
+	pendingRepairJobs := 0
+	completedRepairJobs := 0
+	failedRepairJobs := 0
+	for _, job := range repairJobs {
+		switch job.Status {
+		case "running":
+			activeRepairJobs++
+		case "pending":
+			pendingRepairJobs++
+		case "completed":
+			completedRepairJobs++
+		case "failed", "cancelled":
+			failedRepairJobs++
+		}
+	}
+	stats["repair"] = map[string]interface{}{
+		"active_jobs":    activeRepairJobs,
+		"pending_jobs":   pendingRepairJobs,
+		"completed_jobs": completedRepairJobs,
+		"failed_jobs":    failedRepairJobs,
+	}
+
 	utils.JSONResponse(w, stats, http.StatusOK)
+}
+
+// handleSpeedTest runs a speed test for a specific provider
+func (s *Server) handleSpeedTest(w http.ResponseWriter, r *http.Request) {
+	var req manager.SpeedTestRequest
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Protocol == "" {
+		http.Error(w, "protocol is required", http.StatusBadRequest)
+		return
+	}
+	if req.Provider == "" {
+		http.Error(w, "provider is required", http.StatusBadRequest)
+		return
+	}
+
+	result := s.manager.SpeedTest(r.Context(), req)
+	utils.JSONResponse(w, result, http.StatusOK)
 }

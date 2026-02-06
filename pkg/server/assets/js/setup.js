@@ -3,10 +3,12 @@ class SetupWizard {
     constructor() {
         this.currentStep = 1;
         this.setupState = {
-            step1: {},
-            step2: {},
-            step3: {},
-            step4: {},
+            step1: {}, // Authentication
+            step2: {}, // Debrid
+            step3: {}, // Usenet
+            step4: {}, // Download Folder
+            step5: {}, // Mount System
+            step6: {}, // Overview
         };
 
         this.refs = {
@@ -63,9 +65,20 @@ class SetupWizard {
             document.getElementById('debrid-api-key').value = debrid.api_key || '';
         }
 
+        // Populate usenet fields if exists
+        if (config.usenet && config.usenet.length > 0) {
+            const usenet = config.usenet[0];
+            document.getElementById('usenet-host').value = usenet.host || '';
+            document.getElementById('usenet-port').value = usenet.port || '';
+            document.getElementById('usenet-username').value = usenet.username || '';
+            document.getElementById('usenet-password').value = usenet.password || '';
+            document.getElementById('usenet-max-connections').value = usenet.max_connections || '';
+            document.getElementById('usenet-max-connections-per-reader').value = usenet.reader_connections || '';
+        }
+
         // Populate download folder
         if (config.download_folder) {
-            document.getElementById('download-folder').value = config.manager.download_folder;
+            document.getElementById('download-folder').value = config.download_folder;
         }
 
         // Populate mount settings
@@ -84,20 +97,23 @@ class SetupWizard {
     }
 
     setupEventListeners() {
-        document.getElementById('skip-setup-btn').addEventListener('click', () => this.handleSkipSetup());
         document.getElementById('auth-next-btn').addEventListener('click', () => this.handleAuthNext());
         document.getElementById('skip-auth-btn').addEventListener('click', () => this.handleSkipAuth());
         document.getElementById('debrid-back-btn').addEventListener('click', () => this.goToStep(1));
         document.getElementById('debrid-next-btn').addEventListener('click', () => this.handleDebridNext());
-        document.getElementById('download-back-btn').addEventListener('click', () => this.goToStep(2));
+        document.getElementById('skip-debrid-btn').addEventListener('click', () => this.handleSkipDebrid());
+        document.getElementById('usenet-back-btn').addEventListener('click', () => this.goToStep(2));
+        document.getElementById('usenet-next-btn').addEventListener('click', () => this.handleUsenetNext());
+        document.getElementById('skip-usenet-btn').addEventListener('click', () => this.handleSkipUsenet());
+        document.getElementById('download-back-btn').addEventListener('click', () => this.goToStep(3));
         document.getElementById('download-next-btn').addEventListener('click', () => this.handleDownloadNext());
-        document.getElementById('mount-back-btn').addEventListener('click', () => this.goToStep(3));
+        document.getElementById('mount-back-btn').addEventListener('click', () => this.goToStep(4));
         document.getElementById('mount-next-btn').addEventListener('click', () => this.handleMountNext());
         document.getElementById('mount-type-dfs').addEventListener('change', () => this.toggleMountOptions());
         document.getElementById('mount-type-rclone').addEventListener('change', () => this.toggleMountOptions());
         document.getElementById('mount-type-external').addEventListener('change', () => this.toggleMountOptions());
         document.getElementById('mount-type-none').addEventListener('change', () => this.toggleMountOptions());
-        document.getElementById('overview-back-btn').addEventListener('click', () => this.goToStep(4));
+        document.getElementById('overview-back-btn').addEventListener('click', () => this.goToStep(5));
         document.getElementById('finish-btn').addEventListener('click', () => this.handleFinish());
     }
 
@@ -135,13 +151,13 @@ class SetupWizard {
 
         this.updateProgressIndicators(step);
 
-        if (step === 5) {
+        if (step === 6) {
             this.populateOverview();
         }
     }
 
     updateProgressIndicators(currentStep) {
-        for (let i = 1; i <= 5; i++) {
+        for (let i = 1; i <= 6; i++) {
             const indicator = document.getElementById(`step-indicator-${i}`);
             if (i <= currentStep) {
                 indicator.classList.add('step-primary');
@@ -191,32 +207,6 @@ class SetupWizard {
         this.goToStep(2);
     }
 
-    async handleSkipSetup() {
-        if (confirm('Are you sure you want to skip the setup wizard? Make sure you have a valid config.json file.')) {
-            try {
-                const response = await window.decypharrUtils.fetcher('/api/setup/skip', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ skip: true }),
-                });
-
-                if (!response.ok) {
-                    const errorData = await response.json().catch(() => ({ error: 'Failed to skip setup' }));
-                    throw new Error(errorData.error || 'Failed to skip setup');
-                }
-
-                window.decypharrUtils.createToast('Setup skipped successfully!', 'success');
-                setTimeout(() => {
-                    window.location.href = window.decypharrUtils.joinURL(window.urlBase, '/');
-                }, 1000);
-
-            } catch (error) {
-                console.error('Skip setup error:', error);
-                this.showError(error.message || 'Failed to skip setup');
-            }
-        }
-    }
-
     handleDebridNext() {
         const provider = document.getElementById('debrid-provider').value;
         const apiKey = document.getElementById('debrid-api-key').value.trim();
@@ -238,6 +228,92 @@ class SetupWizard {
         this.goToStep(3);
     }
 
+    handleSkipDebrid() {
+        this.setupState.step2 = { skip_debrid: true };
+        this.goToStep(3);
+    }
+
+    handleUsenetNext() {
+        const host = document.getElementById('usenet-host').value.trim();
+        const port = document.getElementById('usenet-port').value.trim();
+        const username = document.getElementById('usenet-username').value.trim();
+        const password = document.getElementById('usenet-password').value.trim();
+        const maxConnections = document.getElementById('usenet-max-connections').value.trim();
+        const maxConnectionsPerReader = document.getElementById('usenet-max-connections-per-reader').value.trim();
+
+        // If any field is filled, validate all required fields
+        if (host || port || username || password) {
+            if (!host) {
+                this.showError('Usenet server host is required');
+                return;
+            }
+            if (!port) {
+                this.showError('Usenet server port is required');
+                return;
+            }
+            if (!username) {
+                this.showError('Usenet username is required');
+                return;
+            }
+            if (!password) {
+                this.showError('Usenet password is required');
+                return;
+            }
+
+            // Validate port number
+            const portNum = parseInt(port);
+            if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+                this.showError('Please enter a valid port number (1-65535)');
+                return;
+            }
+
+            // Validate max connections if provided
+            if (maxConnections) {
+                const maxConns = parseInt(maxConnections);
+                if (isNaN(maxConns) || maxConns < 1 || maxConns > 50) {
+                    this.showError('Max connections must be between 1 and 50');
+                    return;
+                }
+            }
+
+            if (maxConnectionsPerReader) {
+                const maxConnsPerReader = parseInt(maxConnectionsPerReader);
+                if (isNaN(maxConnsPerReader) || maxConnsPerReader < 1 || maxConnsPerReader > 50) {
+                    this.showError('Connections per stream must be between 1 and 50');
+                    return;
+                }
+            }
+
+            this.setupState.step3 = {
+                host: host,
+                port: parseInt(port),
+                username: username,
+                password: password,
+                max_connections: maxConnections ? parseInt(maxConnections) : 30,
+                reader_connections: maxConnectionsPerReader ? parseInt(maxConnectionsPerReader) : 15,
+                skip_usenet: false,
+            };
+        } else {
+            // All fields empty - skip usenet
+            this.setupState.step3 = { skip_usenet: true };
+        }
+
+        if (!this.ensureProviderRequirement()) {
+            return;
+        }
+
+        this.goToStep(4);
+    }
+
+    handleSkipUsenet() {
+        this.setupState.step3 = { skip_usenet: true };
+        if (!this.ensureProviderRequirement()) {
+            return;
+        }
+
+        this.goToStep(4);
+    }
+
     handleDownloadNext() {
         const downloadFolder = document.getElementById('download-folder').value.trim();
 
@@ -246,11 +322,40 @@ class SetupWizard {
             return;
         }
 
-        this.setupState.step3 = {
+        this.setupState.step4 = {
             download_folder: downloadFolder,
         };
 
-        this.goToStep(4);
+        this.goToStep(5);
+    }
+
+    hasDebridConfigured() {
+        return Boolean(
+            this.setupState.step2 &&
+            !this.setupState.step2.skip_debrid &&
+            this.setupState.step2.provider &&
+            this.setupState.step2.api_key
+        );
+    }
+
+    hasUsenetConfigured() {
+        return Boolean(
+            this.setupState.step3 &&
+            !this.setupState.step3.skip_usenet &&
+            this.setupState.step3.host &&
+            this.setupState.step3.port &&
+            this.setupState.step3.username &&
+            this.setupState.step3.password
+        );
+    }
+
+    ensureProviderRequirement() {
+        if (this.hasDebridConfigured() || this.hasUsenetConfigured()) {
+            return true;
+        }
+
+        this.showError('Please configure at least one Debrid or Usenet provider before continuing.');
+        return false;
     }
 
     toggleMountOptions() {
@@ -277,17 +382,17 @@ class SetupWizard {
             return;
         }
 
-        this.setupState.step4 = {
+        this.setupState.step5 = {
             mount_type: mountType,
             mount_path: mountPath,
             cache_dir: cacheDir,
         };
 
         if (mountType === 'rclone' && rcloneBufferSize) {
-            this.setupState.step4.rclone_buffer_size = rcloneBufferSize;
+            this.setupState.step5.rclone_buffer_size = rcloneBufferSize;
         }
 
-        this.goToStep(5);
+        this.goToStep(6);
     }
 
     populateOverview() {
@@ -301,7 +406,9 @@ class SetupWizard {
         }
 
         const debridOverview = document.getElementById('overview-debrid');
-        if (this.setupState.step2 && this.setupState.step2.provider) {
+        if (this.setupState.step2 && this.setupState.step2.skip_debrid) {
+            debridOverview.textContent = 'Debrid disabled (skipped)';
+        } else if (this.setupState.step2 && this.setupState.step2.provider) {
             debridOverview.innerHTML = `
                 <p><strong>Provider:</strong> ${this.setupState.step2.provider}</p>
             `;
@@ -309,23 +416,37 @@ class SetupWizard {
             debridOverview.textContent = 'Not configured';
         }
 
+        const usenetOverview = document.getElementById('overview-usenet');
+        if (this.setupState.step3 && this.setupState.step3.skip_usenet) {
+            usenetOverview.textContent = 'Usenet disabled (skipped)';
+        } else if (this.setupState.step3 && this.setupState.step3.host) {
+            usenetOverview.innerHTML = `
+                <p><strong>Server:</strong> ${this.setupState.step3.host}:${this.setupState.step3.port}</p>
+                <p><strong>Username:</strong> ${this.setupState.step3.username}</p>
+                <p><strong>Max Connections:</strong> ${this.setupState.step3.max_connections}</p>
+                <p><strong>Connections Per Stream:</strong> ${this.setupState.step3.reader_connections}</p>
+            `;
+        } else {
+            usenetOverview.textContent = 'Not configured';
+        }
+
         const downloadOverview = document.getElementById('overview-download');
-        downloadOverview.textContent = (this.setupState.step3 && this.setupState.step3.download_folder) || 'Not set';
+        downloadOverview.textContent = (this.setupState.step4 && this.setupState.step4.download_folder) || 'Not set';
 
         const mountOverview = document.getElementById('overview-mount');
-        if (this.setupState.step4 && this.setupState.step4.mount_type) {
+        if (this.setupState.step5 && this.setupState.step5.mount_type) {
             let mountType = 'None';
-            if (this.setupState.step4.mount_type === 'rclone') {
+            if (this.setupState.step5.mount_type === 'rclone') {
                 mountType = 'Rclone';
-            } else if (this.setupState.step4.mount_type === 'external_rclone') {
+            } else if (this.setupState.step5.mount_type === 'external_rclone') {
                 mountType = 'External Rclone';
-            } else if (this.setupState.step4.mount_type === 'dfs') {
+            } else if (this.setupState.step5.mount_type === 'dfs') {
                 mountType = 'DFS (Decypharr File System)';
             }
             mountOverview.innerHTML = `
                 <p><strong>Type:</strong> ${mountType}</p>
-                <p><strong>Mount Path:</strong> ${this.setupState.step4.mount_path}</p>
-                <p><strong>Cache Directory:</strong> ${this.setupState.step4.cache_dir}</p>
+                <p><strong>Mount Path:</strong> ${this.setupState.step5.mount_path}</p>
+                <p><strong>Cache Directory:</strong> ${this.setupState.step5.cache_dir}</p>
             `;
         } else {
             mountOverview.textContent = 'Not configured';
@@ -341,13 +462,21 @@ class SetupWizard {
         finishBtnText.classList.add('hidden');
         finishBtnLoading.classList.remove('hidden');
 
+        if (!this.ensureProviderRequirement()) {
+            finishBtn.disabled = false;
+            finishBtnText.classList.remove('hidden');
+            finishBtnLoading.classList.add('hidden');
+            return;
+        }
+
         try {
             // Collect all data
             const setupData = {
                 auth: this.setupState.step1,
                 debrid: this.setupState.step2,
-                download: this.setupState.step3,
-                mount: this.setupState.step4,
+                usenet: this.setupState.step3,
+                download: this.setupState.step4,
+                mount: this.setupState.step5,
             };
 
             const response = await window.decypharrUtils.fetcher('/api/setup/complete', {

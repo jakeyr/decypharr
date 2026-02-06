@@ -1,7 +1,7 @@
 package server
 
 import (
-	"encoding/json"
+	json "github.com/bytedance/sonic"
 	"net/http"
 
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -32,7 +32,7 @@ func (s *Server) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&credentials); err != nil {
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&credentials); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
@@ -71,7 +71,7 @@ func (s *Server) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		data := map[string]interface{}{
 			"URLBase": cfg.URLBase,
 			"Page":    "register",
-			"Title":   "Register",
+			"Title":   "registerVolume",
 		}
 		err := s.templates.ExecuteTemplate(w, "layout", data)
 		if err != nil {
@@ -122,9 +122,8 @@ func (s *Server) IndexHandler(w http.ResponseWriter, r *http.Request) {
 	data := map[string]interface{}{
 		"URLBase":    cfg.URLBase,
 		"Page":       "index",
-		"Title":      "Torrents",
-		"NeedSetup":  cfg.CheckSetup() != nil,
-		"SetupError": cfg.CheckSetup(),
+		"Title":      "Queues",
+		"SetupError": cfg.SetupError(),
 	}
 	err := s.templates.ExecuteTemplate(w, "layout", data)
 	if err != nil {
@@ -139,15 +138,14 @@ func (s *Server) DownloadHandler(w http.ResponseWriter, r *http.Request) {
 		debrids = append(debrids, d.Name)
 	}
 	data := map[string]interface{}{
-		"URLBase":             cfg.URLBase,
-		"Page":                "download",
-		"Title":               "Download",
-		"Debrids":             debrids,
-		"HasMultiDebrid":      len(debrids) > 1,
-		"DownloadFolder":      cfg.DownloadFolder,
-		"AlwaysRmTrackerUrls": cfg.AlwaysRmTrackerUrls,
-		"NeedSetup":           cfg.CheckSetup() != nil,
-		"SetupError":          cfg.CheckSetup(),
+		"URLBase":                 cfg.URLBase,
+		"Page":                    "download",
+		"Title":                   "Download",
+		"Debrids":                 debrids,
+		"HasMultiDebrid":          len(debrids) > 1,
+		"downloadFolder":          cfg.DownloadFolder,
+		"alwaysRemoveTrackerURLS": cfg.AlwaysRmTrackerUrls,
+		"SetupError":              cfg.SetupError(),
 	}
 	err := s.templates.ExecuteTemplate(w, "layout", data)
 	if err != nil {
@@ -161,8 +159,7 @@ func (s *Server) RepairHandler(w http.ResponseWriter, r *http.Request) {
 		"URLBase":    cfg.URLBase,
 		"Page":       "repair",
 		"Title":      "Repair",
-		"NeedSetup":  cfg.CheckSetup() != nil,
-		"SetupError": cfg.CheckSetup(),
+		"SetupError": cfg.SetupError(),
 	}
 	err := s.templates.ExecuteTemplate(w, "layout", data)
 	if err != nil {
@@ -176,8 +173,7 @@ func (s *Server) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 		"URLBase":    cfg.URLBase,
 		"Page":       "config",
 		"Title":      "Config",
-		"NeedSetup":  cfg.CheckSetup() != nil,
-		"SetupError": cfg.CheckSetup(),
+		"SetupError": cfg.SetupError(),
 	}
 	err := s.templates.ExecuteTemplate(w, "layout", data)
 	if err != nil {
@@ -204,8 +200,7 @@ func (s *Server) BrowseHandler(w http.ResponseWriter, r *http.Request) {
 		"URLBase":    cfg.URLBase,
 		"Page":       "browse",
 		"Title":      "Browse Torrents",
-		"NeedSetup":  cfg.CheckSetup() != nil,
-		"SetupError": cfg.CheckSetup(),
+		"SetupError": cfg.SetupError(),
 	}
 	err := s.templates.ExecuteTemplate(w, "layout", data)
 	if err != nil {

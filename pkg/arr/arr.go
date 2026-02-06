@@ -1,26 +1,45 @@
 package arr
 
 import (
+	"bytes"
 	"cmp"
-	"context"
 	"fmt"
+	json "github.com/bytedance/sonic"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/imroc/req/v3"
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/httpclient"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
+	"golang.org/x/sync/singleflight"
 )
 
 // Type is a type of arr
 type Type string
 
-var sharedClient = httpclient.DefaultClient()
+type Source string
+
+const (
+	SourceAuto   Source = "auto"
+	SourceManual Source = "manual"
+)
+
+var (
+	sharedOnce   sync.Once
+	sharedClient *request.Client
+)
+
+func getSharedClient() *request.Client {
+	sharedOnce.Do(func() {
+		sharedClient = request.Default()
+	})
+	return sharedClient
+}
 
 const (
 	Sonarr  Type = "sonarr"
@@ -40,7 +59,7 @@ type Arr struct {
 	SkipRepair       bool   `json:"skip_repair"`
 	DownloadUncached *bool  `json:"download_uncached"`
 	SelectedDebrid   string `json:"selected_debrid,omitempty"` // The debrid service selected for this arr
-	Source           string `json:"source,omitempty"`          // The source of the arr, e.g. "auto", "manual". Auto means it was automatically detected from the arr
+	Source           Source `json:"source,omitempty"`          // The source of the arr, e.g. "auto", "manual". Auto means it was automatically detected from the arr
 }
 
 func New(name, host, token string, cleanup, skipRepair bool, downloadUncached *bool, selectedDebrid, source string) *Arr {
@@ -53,11 +72,11 @@ func New(name, host, token string, cleanup, skipRepair bool, downloadUncached *b
 		SkipRepair:       skipRepair,
 		DownloadUncached: downloadUncached,
 		SelectedDebrid:   selectedDebrid,
-		Source:           source,
+		Source:           Source(source),
 	}
 }
 
-func (a *Arr) Request(method, endpoint string, payload interface{}, res any) (*req.Response, error) {
+func (a *Arr) Request(method, endpoint string, payload interface{}, res any) (*http.Response, error) {
 	if a.Token == "" || a.Host == "" {
 		return nil, fmt.Errorf("arr not configured")
 	}
@@ -66,46 +85,43 @@ func (a *Arr) Request(method, endpoint string, payload interface{}, res any) (*r
 		return nil, err
 	}
 
-	switch method {
-	case http.MethodGet:
-		return sharedClient.R().
-			SetRetryCount(5).
-			SetBody(payload).
-			SetHeader("Content-Type", "application/json").
-			SetHeader("X-Api-Key", a.Token).
-			SetRetryBackoffInterval(100*time.Millisecond, 2*time.Second).
-			SetSuccessResult(res).
-			Get(url)
-	case http.MethodPost:
-		return sharedClient.R().
-			SetRetryCount(5).
-			SetBody(payload).
-			SetHeader("Content-Type", "application/json").
-			SetHeader("X-Api-Key", a.Token).
-			SetRetryBackoffInterval(100*time.Millisecond, 2*time.Second).
-			SetSuccessResult(res).
-			Post(url)
-	case http.MethodPut:
-		return sharedClient.R().
-			SetRetryCount(5).
-			SetBody(payload).
-			SetHeader("Content-Type", "application/json").
-			SetHeader("X-Api-Key", a.Token).
-			SetRetryBackoffInterval(100*time.Millisecond, 2*time.Second).
-			SetSuccessResult(res).
-			Put(url)
-	case http.MethodDelete:
-		return sharedClient.R().
-			SetRetryCount(5).
-			SetBody(payload).
-			SetHeader("Content-Type", "application/json").
-			SetHeader("X-Api-Key", a.Token).
-			SetRetryBackoffInterval(100*time.Millisecond, 2*time.Second).
-			SetSuccessResult(res).
-			Delete(url)
-	default:
-		return nil, fmt.Errorf("unsupported method: %s", method)
+	var body io.Reader
+	if payload != nil {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal payload: %w", err)
+		}
+		body = bytes.NewReader(data)
 	}
+
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", a.Token)
+
+	resp, err := getSharedClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse success result if provided
+	if res != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		defer resp.Body.Close()
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return resp, fmt.Errorf("failed to read response: %w", err)
+		}
+		if len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, res); err != nil {
+				return resp, fmt.Errorf("failed to unmarshal response: %w", err)
+			}
+		}
+	}
+
+	return resp, nil
 }
 
 func (a *Arr) Validate() error {
@@ -120,6 +136,9 @@ func (a *Arr) Validate() error {
 	if err != nil {
 		return err
 	}
+	if resp.Body != nil {
+		defer resp.Body.Close()
+	}
 	// If response is not 200 or 404(this is the case for Lidarr, etc), return an error
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("failed to validate arr %s: %s", a.Name, resp.Status)
@@ -128,19 +147,20 @@ func (a *Arr) Validate() error {
 }
 
 type Storage struct {
-	Arrs   map[string]*Arr // name -> arr
-	mu     sync.Mutex
+	arrs   *xsync.Map[string, *Arr]
 	logger zerolog.Logger
+	sg     singleflight.Group
 }
 
 func (s *Storage) Cleanup() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.Arrs = make(map[string]*Arr)
+	s.arrs.Clear()
 }
 
 func NewStorage() *Storage {
-	arrs := make(map[string]*Arr)
+	s := &Storage{
+		logger: logger.New("arr"),
+		arrs:   xsync.NewMap[string, *Arr](),
+	}
 	for _, a := range config.Get().Arrs {
 		if a.Host == "" || a.Token == "" || a.Name == "" {
 			continue // Skip if host or token is not set
@@ -150,17 +170,12 @@ func NewStorage() *Storage {
 		if utils.ValidateURL(as.Host) != nil {
 			continue
 		}
-		arrs[a.Name] = as
+		s.arrs.Store(name, as)
 	}
-	return &Storage{
-		Arrs:   arrs,
-		logger: logger.New("arr"),
-	}
+	return s
 }
 
 func (s *Storage) AddOrUpdate(arr *Arr) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if arr.Host == "" || arr.Token == "" || arr.Name == "" {
 		return
 	}
@@ -169,16 +184,14 @@ func (s *Storage) AddOrUpdate(arr *Arr) {
 	if utils.ValidateURL(arr.Host) != nil {
 		return
 	}
-	s.Arrs[arr.Name] = arr
+	s.arrs.Store(arr.Name, arr)
 }
 
 func (s *Storage) GetOrCreate(name string) *Arr {
 	if name == "" {
 		name = "uncategorized"
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	arr, exists := s.Arrs[name]
+	arr, exists := s.arrs.Load(name)
 	if !exists {
 		return New(name, "", "", false, false, nil, "", "manual")
 	}
@@ -186,24 +199,23 @@ func (s *Storage) GetOrCreate(name string) *Arr {
 }
 
 func (s *Storage) Get(name string) *Arr {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.Arrs[name]
+	a, ok := s.arrs.Load(name)
+	if !ok {
+		return nil
+	}
+	return a
 }
 
 func (s *Storage) GetAll() []*Arr {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	arrs := make([]*Arr, 0, len(s.Arrs))
-	for _, arr := range s.Arrs {
-		arrs = append(arrs, arr)
-	}
+	arrs := make([]*Arr, 0, s.arrs.Size())
+	s.arrs.Range(func(key string, value *Arr) bool {
+		arrs = append(arrs, value)
+		return true
+	})
 	return arrs
 }
 
 func (s *Storage) SyncToConfig() []config.Arr {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	cfg := config.Get()
 	arrConfigs := make(map[string]config.Arr)
 	for _, a := range cfg.Arrs {
@@ -213,7 +225,7 @@ func (s *Storage) SyncToConfig() []config.Arr {
 		arrConfigs[a.Name] = a
 	}
 
-	for name, arr := range s.Arrs {
+	s.arrs.Range(func(name string, arr *Arr) bool {
 		exists, ok := arrConfigs[name]
 		if ok {
 			// Update existing arr config
@@ -237,10 +249,11 @@ func (s *Storage) SyncToConfig() []config.Arr {
 				SkipRepair:       arr.SkipRepair,
 				DownloadUncached: arr.DownloadUncached,
 				SelectedDebrid:   arr.SelectedDebrid,
-				Source:           arr.Source,
+				Source:           string(arr.Source),
 			}
 		}
-	}
+		return true
+	})
 	// Convert map to slice
 	arrs := make([]config.Arr, 0, len(arrConfigs))
 	for _, a := range arrConfigs {
@@ -250,16 +263,14 @@ func (s *Storage) SyncToConfig() []config.Arr {
 }
 
 func (s *Storage) SyncFromConfig(arrs []config.Arr) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	arrConfigs := make(map[string]*Arr)
+	newMaps := xsync.NewMap[string, *Arr]()
 	for _, a := range arrs {
-		arrConfigs[a.Name] = New(a.Name, a.Host, a.Token, a.Cleanup, a.SkipRepair, a.DownloadUncached, a.SelectedDebrid, a.Source)
+		newMaps.Store(a.Name, New(a.Name, a.Host, a.Token, a.Cleanup, a.SkipRepair, a.DownloadUncached, a.SelectedDebrid, a.Source))
 	}
 
 	// AddOrUpdate or update arrs from config
-	for name, arr := range s.Arrs {
-		if ac, ok := arrConfigs[name]; ok {
+	s.arrs.Range(func(name string, arr *Arr) bool {
+		if ac, ok := newMaps.Load(name); ok {
 			// Update existing arr
 			// is the host URL valid?
 			if utils.ValidateURL(ac.Host) == nil {
@@ -271,46 +282,31 @@ func (s *Storage) SyncFromConfig(arrs []config.Arr) {
 			ac.DownloadUncached = arr.DownloadUncached
 			ac.SelectedDebrid = arr.SelectedDebrid
 			ac.Source = arr.Source
-			arrConfigs[name] = ac
+			newMaps.Store(name, ac)
 		} else {
-			arrConfigs[name] = arr
+			newMaps.Store(name, arr)
 		}
-	}
-
-	// Replace the arrs map
-	s.Arrs = arrConfigs
-
+		return true
+	})
+	s.arrs = newMaps
 }
 
-func (s *Storage) StartWorker(ctx context.Context) error {
-
-	ticker := time.NewTicker(10 * time.Second)
-
-	select {
-	case <-ticker.C:
-		s.cleanupArrsQueue()
-	case <-ctx.Done():
-		ticker.Stop()
-		return nil
-	}
-	return nil
-}
-
-func (s *Storage) cleanupArrsQueue() {
-	arrs := make([]*Arr, 0)
-	for _, arr := range s.Arrs {
-		if !arr.Cleanup {
-			continue
-		}
-		arrs = append(arrs, arr)
-	}
-	if len(arrs) > 0 {
-		for _, arr := range arrs {
-			if err := arr.CleanupQueue(); err != nil {
-				s.logger.Error().Err(err).Msgf("Failed to cleanup arr %s", arr.Name)
-			}
-		}
-	}
+func (s *Storage) Monitor() {
+	wg := sync.WaitGroup{}
+	wg.Add(s.arrs.Size())
+	s.arrs.Range(func(name string, arr *Arr) bool {
+		_, _, _ = s.sg.Do(fmt.Sprintf("cleanup_%s", arr.Name), func() (interface{}, error) {
+			go func() {
+				defer wg.Done()
+				if err := arr.CleanupQueue(); err != nil {
+					s.logger.Error().Err(err).Msgf("Failed to cleanup arr %s", arr.Name)
+				}
+			}()
+			return nil, nil
+		})
+		return true
+	})
+	wg.Wait()
 }
 
 func (a *Arr) Refresh() {

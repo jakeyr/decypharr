@@ -8,26 +8,21 @@ import (
 )
 
 type QBit struct {
-	DownloadFolder      string
-	Categories          []string
-	AlwaysRmTrackerUrls bool
-	logger              zerolog.Logger
-	Tags                []string
-	manager             *manager.Manager
+	downloadFolder          string
+	categories              []string
+	alwaysRemoveTrackerURLS bool
+	logger                  zerolog.Logger
+	Tags                    []string
+	manager                 *manager.Manager
 }
 
 func New(manager *manager.Manager) *QBit {
 	cfg := config.Get()
 	return &QBit{
-		DownloadFolder:      cfg.DownloadFolder,
-		Categories:          cfg.Categories,
-		AlwaysRmTrackerUrls: cfg.AlwaysRmTrackerUrls,
-		manager:             manager,
-		logger:              logger.New("qbit"),
+		downloadFolder:          cfg.DownloadFolder,
+		categories:              cfg.Categories,
+		alwaysRemoveTrackerURLS: cfg.AlwaysRmTrackerUrls,
+		manager:                 manager,
+		logger:                  logger.New("qbit"),
 	}
-}
-
-func (q *QBit) Reset() {
-	// Manager is a singleton, no reset needed
-	q.Tags = nil
 }

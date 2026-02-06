@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/utils"
 )
 
 const (
@@ -55,7 +56,7 @@ func (m *Manager) initCustomFolders() {
 			case filterBySizeGT, filterBySizeLT:
 				df.sizeThreshold, _ = config.ParseSize(v)
 			case filterBLastAdded:
-				df.ageThreshold, _ = time.ParseDuration(v)
+				df.ageThreshold, _ = utils.ParseDuration(v)
 			}
 			dirFilters[name] = append(dirFilters[name], df)
 		}

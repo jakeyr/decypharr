@@ -1,6 +1,8 @@
 package common
 
 import (
+	"context"
+
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/pkg/debrid/account"
@@ -19,10 +21,11 @@ type Client interface {
 	Config() config.Debrid
 	Logger() zerolog.Logger
 	RefreshDownloadLinks() error
-	CheckLink(link string) error
-	AccountManager() *account.Manager // Returns the active download account/token
+	CheckFile(ctx context.Context, infohash, fileID string) error // fileID here can link, file id(in the case of torbox), etc.
+	AccountManager() *account.Manager                             // Returns the active download account/token
 	GetProfile() (*types.Profile, error)
 	GetAvailableSlots() (int, error)
-	SyncAccounts() error // Updates each accounts details(like traffic, username, etc.)
-	DeleteDownloadLink(account *account.Account, downloadLink types.DownloadLink) error
+	SyncAccounts() // Updates each accounts details(like traffic, username, etc.)
+	DeleteLink(dl types.DownloadLink) error
+	SpeedTest(ctx context.Context) types.SpeedTestResult
 }

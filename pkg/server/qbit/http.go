@@ -44,8 +44,8 @@ func (q *QBit) handleWebAPIVersion(w http.ResponseWriter, r *http.Request) {
 func (q *QBit) handlePreferences(w http.ResponseWriter, r *http.Request) {
 	preferences := getAppPreferences()
 
-	preferences.SavePath = q.DownloadFolder
-	preferences.TempPath = filepath.Join(q.DownloadFolder, "temp")
+	preferences.SavePath = q.downloadFolder
+	preferences.TempPath = filepath.Join(q.downloadFolder, "temp")
 
 	utils.JSONResponse(w, preferences, http.StatusOK)
 }
@@ -74,7 +74,7 @@ func (q *QBit) handleTorrentsInfo(w http.ResponseWriter, r *http.Request) {
 	hashes := getHashes(ctx)
 
 	// Convert hashes to filter function
-	torrents := q.manager.Queue().ListFilter(category, storage.TorrentState(state), hashes, "added_on", false)
+	torrents := q.manager.Queue().ListFilter(category, config.ProtocolTorrent, storage.TorrentState(state), hashes, "added_on", false)
 	qbitTorrents := make([]Torrent, len(torrents))
 	for i, t := range torrents {
 		qbitTorrents[i] = convertToQBitTorrentTorrent(t)
@@ -113,7 +113,7 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 	rmTrackerUrls := strings.ToLower(r.FormValue("firstLastPiecePrio")) == "true"
 
 	// Check config setting - if always remove tracker URLs is enabled, force it to true
-	if q.AlwaysRmTrackerUrls {
+	if q.alwaysRemoveTrackerURLS {
 		rmTrackerUrls = true
 	}
 
@@ -133,7 +133,7 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 			urlList = append(urlList, strings.TrimSpace(u))
 		}
 		for _, url := range urlList {
-			if err := q.addMagnet(ctx, url, _arr, debridName, action, rmTrackerUrls); err != nil {
+			if err := q.addMagnet(ctx, url, _arr, debridName, action, cfg.CallbackURL, rmTrackerUrls, cfg.SkipMultiSeason); err != nil {
 				q.logger.Debug().Msgf("Error adding magnet: %s", err.Error())
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
@@ -146,7 +146,7 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 	if r.MultipartForm != nil && r.MultipartForm.File != nil {
 		if files := r.MultipartForm.File["torrents"]; len(files) > 0 {
 			for _, fileHeader := range files {
-				if err := q.addTorrent(ctx, fileHeader, _arr, debridName, action, rmTrackerUrls); err != nil {
+				if err := q.addTorrent(ctx, fileHeader, _arr, debridName, action, cfg.CallbackURL, rmTrackerUrls, cfg.SkipMultiSeason); err != nil {
 					q.logger.Debug().Err(err).Msgf("Error adding torrent")
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
@@ -175,7 +175,6 @@ func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {
 	for _, hash := range hashes {
 		err := q.manager.Queue().Delete(hash, nil)
 		if err != nil {
-			q.logger.Warn().Err(err).Msgf("Error deleting torrent")
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -228,8 +227,8 @@ func (q *QBit) handleTorrentRecheck(w http.ResponseWriter, r *http.Request) {
 
 func (q *QBit) handleCategories(w http.ResponseWriter, r *http.Request) {
 	var categories = map[string]TorrentCategory{}
-	for _, cat := range q.Categories {
-		path := filepath.Join(q.DownloadFolder, cat)
+	for _, cat := range q.categories {
+		path := filepath.Join(q.downloadFolder, cat)
 		categories[cat] = TorrentCategory{
 			Name:     cat,
 			SavePath: path,
@@ -251,7 +250,7 @@ func (q *QBit) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q.Categories = append(q.Categories, name)
+	q.categories = append(q.categories, name)
 
 	utils.JSONResponse(w, nil, http.StatusOK)
 }
@@ -260,7 +259,7 @@ func (q *QBit) handleTorrentProperties(w http.ResponseWriter, r *http.Request) {
 	hash := r.URL.Query().Get("hash")
 	torrent, err := q.manager.Queue().GetTorrent(hash)
 	if err != nil {
-		http.Error(w, "Torrent not found", http.StatusNotFound)
+		http.Error(w, "Entry not found", http.StatusNotFound)
 		return
 	}
 
@@ -272,7 +271,7 @@ func (q *QBit) handleTorrentFiles(w http.ResponseWriter, r *http.Request) {
 	hash := r.URL.Query().Get("hash")
 	torrent, err := q.manager.Queue().GetTorrent(hash)
 	if err != nil {
-		http.Error(w, "Torrent not found", http.StatusNotFound)
+		http.Error(w, "Entry not found", http.StatusNotFound)
 		return
 	}
 	utils.JSONResponse(w, getTorrentFiles(torrent), http.StatusOK)
@@ -282,7 +281,7 @@ func (q *QBit) handleSetCategory(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	category := getCategory(ctx)
 	hashes := getHashes(ctx)
-	var filterFunc func(t *storage.Torrent) bool
+	var filterFunc func(t *storage.Entry) bool
 
 	hashSet := make(map[string]bool)
 	if len(hashes) > 0 {
@@ -292,7 +291,7 @@ func (q *QBit) handleSetCategory(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	updateFunc := func(t *storage.Torrent) bool {
+	updateFunc := func(t *storage.Entry) bool {
 		if t.Category != category {
 			t.Category = category
 			return true
@@ -320,7 +319,7 @@ func (q *QBit) handleAddTorrentTags(w http.ResponseWriter, r *http.Request) {
 	for i, tag := range tags {
 		tags[i] = strings.TrimSpace(tag)
 	}
-	torrents := q.manager.Queue().ListFilter("", "", hashes, "", false)
+	torrents := q.manager.Queue().ListFilter("", config.ProtocolTorrent, "", hashes, "", false)
 	for _, t := range torrents {
 		q.setTorrentTags(t, tags)
 	}
@@ -339,7 +338,7 @@ func (q *QBit) handleRemoveTorrentTags(w http.ResponseWriter, r *http.Request) {
 	for i, tag := range tags {
 		tags[i] = strings.TrimSpace(tag)
 	}
-	torrents := q.manager.Queue().ListFilter("", "", hashes, "", false)
+	torrents := q.manager.Queue().ListFilter("", config.ProtocolTorrent, "", hashes, "", false)
 	for _, torrent := range torrents {
 		q.removeTorrentTags(torrent, tags)
 

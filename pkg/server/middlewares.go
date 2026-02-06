@@ -1,9 +1,11 @@
 package server
 
 import (
-	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+
+	json "github.com/bytedance/sonic"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 )
@@ -60,7 +62,7 @@ func (s *Server) isAPIRequest(r *http.Request) bool {
 func (s *Server) sendJSONError(w http.ResponseWriter, message string, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	err := json.NewEncoder(w).Encode(map[string]interface{}{
+	err := json.ConfigDefault.NewEncoder(w).Encode(map[string]interface{}{
 		"error":  message,
 		"status": statusCode,
 	})
@@ -77,6 +79,9 @@ func (s *Server) setupRedirectMiddleware(next http.Handler) http.Handler {
 		// Skip setup check for setup-related routes
 		if strings.HasPrefix(r.URL.Path, "/setup") ||
 			strings.HasPrefix(r.URL.Path, "/api/setup") ||
+			strings.HasPrefix(r.URL.Path, "/api/login") ||
+			strings.HasPrefix(r.URL.Path, "/api/logout") ||
+			strings.HasPrefix(r.URL.Path, "/api/config") ||
 			strings.HasPrefix(r.URL.Path, "/assets") ||
 			strings.HasPrefix(r.URL.Path, "/images") ||
 			r.URL.Path == "/version" {
@@ -85,10 +90,10 @@ func (s *Server) setupRedirectMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Check if setup is completed
-		if !cfg.SetupCompleted {
+		if err := cfg.SetupComplete(); err != nil {
 			isAPI := s.isAPIRequest(r)
 			if isAPI {
-				s.sendJSONError(w, "Setup wizard must be completed first. Please visit /setup", http.StatusServiceUnavailable)
+				s.sendJSONError(w, fmt.Sprintf("[error] %s Setup wizard must be completed first. Please visit /setup", err), http.StatusServiceUnavailable)
 			} else {
 				http.Redirect(w, r, "/setup", http.StatusSeeOther)
 			}

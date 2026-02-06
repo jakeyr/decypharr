@@ -322,10 +322,10 @@ class FileBrowser {
                                 ` : ''}
                                 ${entry.can_delete ? `
                                     <li><a onclick="window.fileBrowser.showMoveModal('${this.escapeJs(entry.info_hash)}')">
-                                        <i class="bi bi-arrow-left-right"></i> Move to Debrid
+                                        <i class="bi bi-arrow-left-right"></i> Switch Provider
                                     </a></li>
                                     <li><a onclick="window.fileBrowser.deleteTorrent('${this.escapeJs(entry.info_hash)}', '${this.escapeJs(entry.name)}')" class="text-error">
-                                        <i class="bi bi-trash"></i> Delete Torrent
+                                        <i class="bi bi-trash"></i> Delete
                                     </a></li>
                                 ` : ''}
                             </ul>
@@ -451,7 +451,7 @@ class FileBrowser {
 
         try {
             const response = await fetch(`${window.urlBase}api/browse/torrents/${infoHash}/info`);
-            if (!response.ok) throw new Error('Failed to load torrent info');
+            if (!response.ok) throw new Error('Failed to load item info');
 
             const torrent = await response.json();
             this.currentMoveTarget = torrent;
@@ -477,8 +477,8 @@ class FileBrowser {
 
             this.refs.moveTorrentModal.showModal();
         } catch (error) {
-            console.error('Error loading torrent info:', error);
-            window.createToast('Failed to load torrent info', 'error');
+            console.error('Error loading item info:', error);
+            window.createToast('Failed to load item info', 'error');
         }
     }
 
@@ -517,7 +517,7 @@ class FileBrowser {
     async deleteTorrent(infoHash, name) {
         this.hideContextMenu();
 
-        if (!confirm(`Delete "${name}"?\n\nThis will remove the torrent from the management system.`)) {
+        if (!confirm(`Delete "${name}"?\n\nThis will remove the item from the system.`)) {
             return;
         }
 
@@ -526,13 +526,13 @@ class FileBrowser {
                 method: 'DELETE'
             });
 
-            if (!response.ok) throw new Error('Failed to delete torrent');
+            if (!response.ok) throw new Error('Failed to delete entry');
 
-            window.createToast('Torrent deleted successfully', 'success');
+            window.createToast('Item deleted successfully', 'success');
             this.refresh();
         } catch (error) {
-            console.error('Error deleting torrent:', error);
-            window.createToast('Failed to delete torrent', 'error');
+            console.error('Error deleting item:', error);
+            window.createToast('Failed to delete item', 'error');
         }
     }
 
@@ -651,7 +651,7 @@ class FileBrowser {
         const torrents = selectedEntries.filter(e => e.can_delete && e.info_hash);
 
         if (torrents.length === 0) {
-            window.createToast('No torrents selected for moving', 'warning');
+            window.createToast('No items selected for moving', 'warning');
             return;
         }
 
@@ -660,7 +660,7 @@ class FileBrowser {
             return;
         }
 
-        window.createToast('Bulk move not yet implemented for multiple torrents', 'info');
+        window.createToast('Bulk move not yet implemented for multiple items', 'info');
     }
 
     async bulkDelete() {
@@ -668,12 +668,12 @@ class FileBrowser {
         const torrents = selectedEntries.filter(e => e.can_delete && e.info_hash);
 
         if (torrents.length === 0) {
-            window.createToast('No torrents selected for deletion', 'warning');
+            window.createToast('No items selected for deletion', 'warning');
             return;
         }
 
         const names = torrents.map(t => t.name).join('\n');
-        if (!confirm(`Delete ${torrents.length} torrent(s)?\n\n${names}\n\nThis will remove the torrents from the management system.`)) {
+        if (!confirm(`Delete ${torrents.length} torrent(s)?\n\n${names}\n\nThis will remove the items from the management system.`)) {
             return;
         }
 
@@ -689,7 +689,7 @@ class FileBrowser {
                     this.state.selectedEntries.delete(torrent.info_hash);
                 }
             } catch (error) {
-                console.error(`Error deleting torrent ${torrent.name}:`, error);
+                console.error(`Error deleting item ${torrent.name}:`, error);
             }
         }
 

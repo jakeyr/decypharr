@@ -3,7 +3,7 @@ class TorrentDashboard {
     constructor() {
         this.state = {
             torrents: [],
-            selectedTorrents: new Set(),
+            selectedEntries: new Set(),
             categories: [],
             total: 0,
             currentPage: 1,
@@ -230,8 +230,8 @@ class TorrentDashboard {
             this.updateUI();
 
         } catch (error) {
-            console.error('Error loading torrents:', error);
-            window.decypharrUtils.createToast(`Error loading torrents: ${error.message}`, 'error');
+            console.error('Error loading items:', error);
+            window.decypharrUtils.createToast(`Error loading items: ${error.message}`, 'error');
         } finally {
             this.refs.refreshBtn.disabled = false;
         }
@@ -276,7 +276,7 @@ class TorrentDashboard {
         }
 
         this.refs.torrentsList.innerHTML = this.state.torrents.map(torrent => {
-            const isSelected = this.state.selectedTorrents.has(torrent.info_hash);
+            const isSelected = this.state.selectedEntries.has(torrent.info_hash);
             return `
                 <tr class="hover" data-hash="${torrent.info_hash}" data-name="${this.escapeHtml(torrent.name)}" data-category="${this.escapeHtml(torrent.category || '')}">
                     <td>
@@ -304,6 +304,9 @@ class TorrentDashboard {
                         ${torrent.category ? `<span class="badge badge-sm badge-outline">${this.escapeHtml(torrent.category)}</span>` : '-'}
                     </td>
                     <td>
+                        ${this.renderProtocolBadge(torrent.protocol)}
+                    </td>
+                    <td>
                         ${torrent.debrid ? `<span class="badge badge-sm badge-primary">${this.escapeHtml(torrent.debrid)}</span>` : '-'}
                     </td>
                     <td>
@@ -314,10 +317,12 @@ class TorrentDashboard {
                     </td>
                     <td>
                         <button class="btn btn-ghost btn-xs text-error"
+                                title="Delete Torrent"
                                 onclick="window.dashboard.deleteTorrent('${torrent.info_hash}', '${this.escapeAttr(torrent.category || '')}', false);">
                             <i class="bi bi-trash"></i>
                         </button>
                         <button class="btn btn-ghost btn-xs text-error"
+                                title="Delete from Provider"
                                 onclick="window.dashboard.deleteTorrent('${torrent.info_hash}', '${this.escapeAttr(torrent.category || '')}', true);">
                             <i class="bi bi-cloud-slash"></i>
                         </button>
@@ -353,6 +358,16 @@ class TorrentDashboard {
 
         const s = stateMap[state] || { class: 'badge-ghost', text: state };
         return `<span class="badge ${s.class} badge-sm">${s.text}</span>`;
+    }
+
+    renderProtocolBadge(protocol) {
+        const protocolMap = {
+            'torrent': { class: 'badge-accent', icon: 'bi-magnet', text: 'Torrent' },
+            'nzb': { class: 'badge-secondary', icon: 'bi-newspaper', text: 'Usenet' }
+        };
+
+        const p = protocolMap[protocol] || { class: 'badge-ghost', icon: 'bi-question-circle', text: protocol || 'Unknown' };
+        return `<span class="badge ${p.class} badge-sm"><i class="${p.icon} mr-1"></i>${p.text}</span>`;
     }
 
     renderPagination() {
@@ -408,9 +423,9 @@ class TorrentDashboard {
 
     toggleSelectAll(checked) {
         if (checked) {
-            this.state.torrents.forEach(t => this.state.selectedTorrents.add(t.info_hash));
+            this.state.torrents.forEach(t => this.state.selectedEntries.add(t.info_hash));
         } else {
-            this.state.selectedTorrents.clear();
+            this.state.selectedEntries.clear();
         }
         this.renderTorrents();
         this.updateSelectionUI();
@@ -418,20 +433,20 @@ class TorrentDashboard {
 
     toggleTorrentSelection(hash, checked) {
         if (checked) {
-            this.state.selectedTorrents.add(hash);
+            this.state.selectedEntries.add(hash);
         } else {
-            this.state.selectedTorrents.delete(hash);
+            this.state.selectedEntries.delete(hash);
         }
         this.updateSelectionUI();
     }
 
     updateSelectionUI() {
-        const hasSelection = this.state.selectedTorrents.size > 0;
+        const hasSelection = this.state.selectedEntries.size > 0;
         this.refs.batchDeleteBtn.classList.toggle('hidden', !hasSelection);
         this.refs.batchDeleteDebridBtn.classList.toggle('hidden', !hasSelection);
 
         const allSelected = this.state.torrents.length > 0 &&
-            this.state.torrents.every(t => this.state.selectedTorrents.has(t.info_hash));
+            this.state.torrents.every(t => this.state.selectedEntries.has(t.info_hash));
         this.refs.selectAll.checked = allSelected;
     }
 
@@ -442,31 +457,31 @@ class TorrentDashboard {
             const url = `${window.urlBase}api/torrents/${category}/${hash}?removeFromDebrid=${removeFromDebrid}`;
             const response = await window.decypharrUtils.fetcher(url, { method: 'DELETE' });
 
-            if (!response.ok) throw new Error('Failed to delete torrent');
+            if (!response.ok) throw new Error('Failed to delete entry');
 
-            window.decypharrUtils.createToast('Torrent deleted successfully');
-            this.state.selectedTorrents.delete(hash);
+            window.decypharrUtils.createToast('Item deleted successfully');
+            this.state.selectedEntries.delete(hash);
             this.loadTorrents();
         } catch (error) {
             console.error('Error deleting torrent:', error);
-            window.decypharrUtils.createToast('Failed to delete torrent', 'error');
+            window.decypharrUtils.createToast('Failed to delete entry', 'error');
         }
     }
 
     async deleteSelectedTorrents(removeFromDebrid = false) {
-        if (this.state.selectedTorrents.size === 0) return;
+        if (this.state.selectedEntries.size === 0) return;
 
-        if (!confirm(`Delete ${this.state.selectedTorrents.size} selected torrents?`)) return;
+        if (!confirm(`Delete ${this.state.selectedEntries.size} selected torrents?`)) return;
 
         try {
-            const hashes = Array.from(this.state.selectedTorrents).join(',');
+            const hashes = Array.from(this.state.selectedEntries).join(',');
             const url = `${window.urlBase}api/torrents?hashes=${hashes}&removeFromDebrid=${removeFromDebrid}`;
             const response = await window.decypharrUtils.fetcher(url, { method: 'DELETE' });
 
             if (!response.ok) throw new Error('Failed to delete torrents');
 
-            window.decypharrUtils.createToast(`Deleted ${this.state.selectedTorrents.size} torrents`);
-            this.state.selectedTorrents.clear();
+            window.decypharrUtils.createToast(`Deleted ${this.state.selectedEntries.size} torrents`);
+            this.state.selectedEntries.clear();
             this.loadTorrents();
         } catch (error) {
             console.error('Error deleting torrents:', error);

@@ -6,6 +6,8 @@ class DownloadManager {
             downloadForm: document.getElementById('downloadForm'),
             magnetURI: document.getElementById('magnetURI'),
             torrentFiles: document.getElementById('torrentFiles'),
+            nzbURL: document.getElementById('nzbURL'),
+            nzbFile: document.getElementById('nzbFile'),
             arr: document.getElementById('arr'),
             downloadAction: document.getElementById('downloadAction'),
             downloadUncached: document.getElementById('downloadUncached'),
@@ -39,7 +41,8 @@ class DownloadManager {
         this.refs.downloadFolder.addEventListener('change', () => this.saveOptions());
 
         // File input enhancement
-        this.refs.torrentFiles.addEventListener('change', (e) => this.handleFileSelection(e));
+        this.refs.torrentFiles.addEventListener('change', (e) => this.handleFileSelection(e, 'torrent'));
+        this.refs.nzbFile.addEventListener('change', (e) => this.handleFileSelection(e, 'nzb'));
 
         // Drag and drop
         this.setupDragAndDrop();
@@ -92,7 +95,7 @@ class DownloadManager {
 
         const formData = new FormData();
 
-        // Get URLs
+        // Get URLs (torrent/magnet)
         const urls = this.refs.magnetURI.value
             .split('\n')
             .map(url => url.trim())
@@ -102,20 +105,35 @@ class DownloadManager {
             formData.append('urls', urls.join('\n'));
         }
 
-        // Get files
+        // Get torrent files
         for (let i = 0; i < this.refs.torrentFiles.files.length; i++) {
             formData.append('files', this.refs.torrentFiles.files[i]);
         }
 
+        // Get NZB URLs (support multiple URLs separated by newlines)
+        const nzbURLs = this.refs.nzbURL.value
+            .split('\n')
+            .map(url => url.trim())
+            .filter(url => url.length > 0);
+
+        if (nzbURLs.length > 0) {
+            formData.append('nzbURLs', nzbURLs.join('\n'));
+        }
+
+        // Get NZB files (support multiple files)
+        for (let i = 0; i < this.refs.nzbFile.files.length; i++) {
+            formData.append('nzbFiles', this.refs.nzbFile.files[i]);
+        }
+
         // Validation
-        const totalItems = urls.length + this.refs.torrentFiles.files.length;
+        const totalItems = urls.length + this.refs.torrentFiles.files.length + nzbURLs.length + this.refs.nzbFile.files.length;
         if (totalItems === 0) {
-            window.decypharrUtils.createToast('Please provide at least one torrent', 'warning');
+            window.decypharrUtils.createToast('Please provide at least one torrent or NZB', 'warning');
             return;
         }
 
         if (totalItems > 100) {
-            window.decypharrUtils.createToast('Please submit up to 100 torrents at a time', 'warning');
+            window.decypharrUtils.createToast('Please submit up to 100 items at a time', 'warning');
             return;
         }
 
@@ -140,29 +158,34 @@ class DownloadManager {
                 headers: {} // Remove Content-Type to let browser set it for FormData
             });
 
-            const result = await response.json();
+            const results = await response.json();
 
             if (!response.ok) {
-                throw new Error(result.error || 'Unknown error');
+                throw new Error(results.error || 'Unknown error');
             }
 
+            // Separate successful and failed results
+            const successes = results.filter(r => r.status !== 'error');
+            const failures = results.filter(r => r.status === 'error');
+
             // Handle partial success
-            if (result.errors && result.errors.length > 0) {
-                if (result.results.length > 0) {
+            if (failures.length > 0) {
+                if (successes.length > 0) {
                     window.decypharrUtils.createToast(
-                        `Added ${result.results.length} torrents with ${result.errors.length} errors`,
+                        `Added ${successes.length} item(s) with ${failures.length} error(s)`,
                         'warning'
                     );
-                    this.showErrorDetails(result.errors);
+                    this.showErrorDetails(failures);
                 } else {
-                    window.decypharrUtils.createToast('Failed to add torrents', 'error');
-                    this.showErrorDetails(result.errors);
+                    this.showErrorDetails(failures);
                 }
-            } else {
+            } else if (successes.length > 0) {
                 window.decypharrUtils.createToast(
-                    `Successfully added ${result.results.length} torrent${result.results.length > 1 ? 's' : ''}!`
+                    `Successfully added ${successes.length} item${successes.length > 1 ? 's' : ''}!`
                 );
                 this.clearForm();
+            } else {
+                window.decypharrUtils.createToast('No items were added', 'warning');
             }
 
         } catch (error) {
@@ -173,12 +196,12 @@ class DownloadManager {
         }
     }
 
-    showErrorDetails(errors) {
-        // Create a modal or detailed view for errors
-        const errorList = errors.map(error => `• ${error}`).join('\n');
+    showErrorDetails(failures) {
+        // Extract error messages from the failed results
+        const errorList = failures.map(f => `• ${f.error || 'Unknown error'}`).join('\n');
         console.error('Download errors:', errorList);
         window.decypharrUtils.createToast(
-            `Errors occurred while adding torrents:\n${errorList}`,
+            `Errors occurred while adding items:\n${errorList}`,
             'error'
         );
     }
@@ -186,14 +209,17 @@ class DownloadManager {
     clearForm() {
         this.refs.magnetURI.value = '';
         this.refs.torrentFiles.value = '';
+        this.refs.nzbURL.value = '';
+        this.refs.nzbFile.value = '';
     }
 
-    handleFileSelection(e) {
+    handleFileSelection(e, type) {
         const files = e.target.files;
         if (files.length > 0) {
             const fileNames = Array.from(files).map(f => f.name).join(', ');
+            const fileType = type === 'nzb' ? 'NZB' : 'torrent';
             window.decypharrUtils.createToast(
-                `Selected ${files.length} file${files.length > 1 ? 's' : ''}: ${fileNames}`,
+                `Selected ${files.length} ${fileType} file${files.length > 1 ? 's' : ''}: ${fileNames}`,
                 'info'
             );
         }
@@ -234,20 +260,32 @@ class DownloadManager {
         const dt = e.dataTransfer;
         const files = dt.files;
 
-        // Filter for .torrent files
+        // Filter for .torrent and .nzb files
         const torrentFiles = Array.from(files).filter(file =>
             file.name.toLowerCase().endsWith('.torrent')
         );
+        const nzbFiles = Array.from(files).filter(file =>
+            file.name.toLowerCase().endsWith('.nzb')
+        );
 
         if (torrentFiles.length > 0) {
-            // Create a new FileList-like object
+            // Create a new FileList-like object for torrents
             const dataTransfer = new DataTransfer();
             torrentFiles.forEach(file => dataTransfer.items.add(file));
             this.refs.torrentFiles.files = dataTransfer.files;
+            this.handleFileSelection({ target: { files: torrentFiles } }, 'torrent');
+        }
 
-            this.handleFileSelection({ target: { files: torrentFiles } });
-        } else {
-            window.decypharrUtils.createToast('Please drop .torrent files only', 'warning');
+        if (nzbFiles.length > 0) {
+            // For NZB, only take the first file since we only accept one
+            const dataTransfer = new DataTransfer();
+            dataTransfer.items.add(nzbFiles[0]);
+            this.refs.nzbFile.files = dataTransfer.files;
+            this.handleFileSelection({ target: { files: [nzbFiles[0]] } }, 'nzb');
+        }
+
+        if (torrentFiles.length === 0 && nzbFiles.length === 0) {
+            window.decypharrUtils.createToast('Please drop .torrent or .nzb files only', 'warning');
         }
     }
 }

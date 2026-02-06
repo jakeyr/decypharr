@@ -131,9 +131,10 @@ type LibraryStats struct {
 }
 
 type Stats struct {
-	Profile  *Profile         `json:"profile"`
-	Library  LibraryStats     `json:"library"`
-	Accounts []map[string]any `json:"accounts"`
+	Profile         *Profile         `json:"profile"`
+	Library         LibraryStats     `json:"library"`
+	Accounts        []map[string]any `json:"accounts"`
+	SpeedTestResult *SpeedTestResult `json:"speed_test_result,omitempty"`
 }
 
 type Profile struct {
@@ -163,6 +164,12 @@ func (dl *DownloadLink) Valid() error {
 	if dl.Empty() {
 		return EmptyDownloadLinkError
 	}
+
+	// Validate url format
+	if !utils.IsValidURL(dl.DownloadLink) {
+		return InvalidDownloadLinkError
+	}
+
 	return nil
 }
 
@@ -172,4 +179,14 @@ func (dl *DownloadLink) Empty() bool {
 
 func (dl *DownloadLink) String() string {
 	return dl.DownloadLink
+}
+
+// SpeedTestResult holds the result of a debrid provider speed test
+type SpeedTestResult struct {
+	Provider  string    `json:"provider"`
+	SpeedMBps float64   `json:"speed_mbps"`
+	LatencyMs int64     `json:"latency_ms"`
+	BytesRead int64     `json:"bytes_read"`
+	TestedAt  time.Time `json:"tested_at"`
+	Error     string    `json:"error,omitempty"`
 }

@@ -9,31 +9,25 @@ import (
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/retry"
+	"github.com/sirrobot01/decypharr/internal/utils"
+	"golang.org/x/net/context"
 )
 
-// mountWithRetry attempts to mount with retry logic
+// mountWithRetry attempts to mount with retry logic using avast/retry-go
 func (m *Mount) mountWithRetry(maxRetries int) error {
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			// Wait before retry
-			wait := time.Duration(attempt*2) * time.Second
-			m.logger.Debug().
-				Int("attempt", attempt).
-				Msg("Retrying mount operation")
-			time.Sleep(wait)
-		}
-
-		if err := m.performMount(); err != nil {
-			m.logger.Error().
-				Err(err).
-				Int("attempt", attempt+1).
-				Msg("Mount attempt failed")
-			continue
-		}
-
-		return nil // Success
-	}
-	return fmt.Errorf("mount failed for %s", m.Provider)
+	return retry.Do(
+		func() error {
+			return m.performMount()
+		},
+		retry.Attempts(uint(maxRetries)+1),
+		retry.Delay(config.DefaultRetryDelay),
+		retry.DelayType(retry.FixedDelay),
+		retry.LastErrorOnly(true),
+		retry.RetryIf(func(err error) bool {
+			return true // Always retry on error
+		}),
+	)
 }
 
 // performMount performs a single mount attempt
@@ -41,7 +35,6 @@ func (m *Mount) performMount() error {
 	cfg := config.Get()
 
 	// Create mount directory if not on windows
-
 	if runtime.GOOS != "windows" {
 		_ = os.MkdirAll(m.MountPath, 0755)
 	}
@@ -69,15 +62,15 @@ func (m *Mount) performMount() error {
 
 	// Prepare mount arguments
 	mountArgs := map[string]interface{}{
-		"fs":         fmt.Sprintf("%s:", m.Provider),
+		"fs":         FSName,
 		"mountPoint": m.MountPath,
 	}
 	mountOpt := map[string]interface{}{
 		"AllowNonEmpty": true,
 		"AllowOther":    true,
 		"DebugFUSE":     false,
-		"DeviceName":    fmt.Sprintf("decypharr-%s", m.Provider),
-		"VolumeName":    fmt.Sprintf("decypharr-%s", m.Provider),
+		"DeviceName":    "decypharr",
+		"VolumeName":    "decypharr",
 	}
 
 	if cfg.Mount.Rclone.AsyncRead != nil {
@@ -170,7 +163,7 @@ func (m *Mount) performMount() error {
 	}
 
 	if cfg.Mount.Rclone.AttrTimeout != "" {
-		if attrTimeout, err := time.ParseDuration(cfg.Mount.Rclone.AttrTimeout); err == nil {
+		if attrTimeout, err := utils.ParseDuration(cfg.Mount.Rclone.AttrTimeout); err == nil {
 			mountOpt["AttrTimeout"] = attrTimeout.String()
 		}
 	}
@@ -178,19 +171,18 @@ func (m *Mount) performMount() error {
 	mountArgs["vfsOpt"] = vfsOpt
 	mountArgs["mountOpt"] = mountOpt
 
-	if err := m.client.Mount(mountArgs); err != nil {
+	if err := m.client.Mount(context.Background(), mountArgs); err != nil {
 		_ = m.forceUnmount()
-		return fmt.Errorf("failed to mount %s via RC: %w", m.Provider, err)
+		return fmt.Errorf("failed to mount %s via RC: %w", m.MountPath, err)
 	}
 
 	// Store mount info
 	mntInfo := &MountInfo{
-		Provider:   m.Provider,
 		LocalPath:  m.MountPath,
 		WebDAVURL:  m.WebDAVURL,
 		Mounted:    true,
 		MountedAt:  time.Now().Format(time.RFC3339),
-		ConfigName: m.Provider,
+		ConfigName: ConfigName,
 	}
 
 	m.info.Store(mntInfo)
@@ -199,19 +191,19 @@ func (m *Mount) performMount() error {
 }
 
 // unmount is the internal unmount function
-func (m *Mount) unmount() error {
+func (m *Mount) unmount() {
 	mountInfo := m.getMountInfo()
 
 	if mountInfo == nil || !mountInfo.Mounted {
 		m.logger.Info().Msg("Mount not found or already unmounted")
-		return nil
+		return
 	}
 
 	m.logger.Info().Msg("Unmounting")
 
 	// Try RC unmount first
 
-	err := m.client.Unmount(mountInfo.LocalPath)
+	err := m.client.Unmount(context.Background(), mountInfo.LocalPath)
 
 	// If RC unmount fails or server is not ready, try force unmount
 	if err != nil {
@@ -229,13 +221,13 @@ func (m *Mount) unmount() error {
 		mountInfo.Error = err.Error()
 	}
 	m.logger.Info().Msg("Unmount completed")
-	return nil
+	return
 }
 
 // createConfig creates an rclone config entry for the provider
 func (m *Mount) createConfig() error {
 	args := map[string]interface{}{
-		"name": m.Provider,
+		"name": ConfigName,
 		"type": "webdav",
 		"parameters": map[string]interface{}{
 			"url":             m.WebDAVURL,
@@ -243,8 +235,8 @@ func (m *Mount) createConfig() error {
 			"pacer_min_sleep": "0",
 		},
 	}
-	if err := m.client.CreateConfig(args); err != nil {
-		return fmt.Errorf("failed to create rclone config for %s: %w", m.Provider, err)
+	if err := m.client.CreateConfig(context.Background(), args); err != nil {
+		return fmt.Errorf("failed to create rclone config for %s: %w", m.MountPath, err)
 	}
 	return nil
 }

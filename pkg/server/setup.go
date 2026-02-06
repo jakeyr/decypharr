@@ -1,10 +1,11 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+
+	json "github.com/bytedance/sonic"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"golang.org/x/crypto/bcrypt"
@@ -46,6 +47,11 @@ type SetupWizardResponse struct {
 // SetupHandler renders the setup wizard page
 func (s *Server) SetupHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
+
+	if err := cfg.SetupComplete(); err == nil {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
 	data := map[string]interface{}{
 		"URLBase": cfg.URLBase,
 		"Page":    "setup",
@@ -69,7 +75,7 @@ func (s *Server) sendSetupError(w http.ResponseWriter, message string, err error
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
-	_ = json.NewEncoder(w).Encode(response)
+	_ = json.ConfigDefault.NewEncoder(w).Encode(response)
 }
 
 // SetupCompleteRequest represents the complete setup data from frontend
@@ -80,9 +86,19 @@ type SetupCompleteRequest struct {
 		SkipAuth bool   `json:"skip_auth,omitempty"`
 	} `json:"auth"`
 	Debrid struct {
-		Provider string `json:"provider"`
-		APIKey   string `json:"api_key"`
+		Provider string `json:"provider,omitempty"`
+		APIKey   string `json:"api_key,omitempty"`
+		Skip     bool   `json:"skip_debrid,omitempty"`
 	} `json:"debrid"`
+	Usenet struct {
+		Host              string `json:"host,omitempty"`
+		Port              int    `json:"port,omitempty"`
+		Username          string `json:"username,omitempty"`
+		Password          string `json:"password,omitempty"`
+		MaxConnections    int    `json:"max_connections,omitempty"`
+		ReaderConnections int    `json:"reader_connections,omitempty"`
+		Skip              bool   `json:"skip_usenet,omitempty"`
+	} `json:"usenet"`
 	Download struct {
 		DownloadFolder string `json:"download_folder"`
 	} `json:"download"`
@@ -97,12 +113,20 @@ type SetupCompleteRequest struct {
 // setupCompleteHandler handles the complete setup in a single request
 func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	var req SetupCompleteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.sendSetupError(w, "Invalid request format", err)
 		return
 	}
 
 	cfg := config.Get()
+
+	hasDebrid := !req.Debrid.Skip && req.Debrid.Provider != "" && req.Debrid.APIKey != ""
+	hasUsenet := !req.Usenet.Skip && req.Usenet.Host != "" && req.Usenet.Port > 0 && req.Usenet.Username != "" && req.Usenet.Password != ""
+
+	if !hasDebrid && !hasUsenet {
+		s.sendSetupError(w, "Please configure at least one Debrid or Usenet provider", nil)
+		return
+	}
 
 	// Step 1: Handle Authentication
 	if req.Auth.SkipAuth {
@@ -129,40 +153,69 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Step 2: Handle Debrid Account
-	if req.Debrid.Provider == "" || req.Debrid.APIKey == "" {
-		s.sendSetupError(w, "Debrid provider, API key, and mount folder are required", nil)
-		return
-	}
+	// Step 2: Handle Debrid Provider (optional)
+	if hasDebrid {
+		validProviders := map[string]bool{
+			"realdebrid": true,
+			"alldebrid":  true,
+			"debridlink": true,
+			"torbox":     true,
+		}
 
-	validProviders := map[string]bool{
-		"realdebrid": true,
-		"alldebrid":  true,
-		"debridlink": true,
-		"torbox":     true,
-	}
+		if !validProviders[req.Debrid.Provider] {
+			s.sendSetupError(w, "Invalid debrid provider", nil)
+			return
+		}
 
-	if !validProviders[req.Debrid.Provider] {
-		s.sendSetupError(w, "Invalid debrid provider", nil)
-		return
-	}
+		debrid := config.Debrid{
+			Provider:         req.Debrid.Provider,
+			Name:             req.Debrid.Provider,
+			APIKey:           req.Debrid.APIKey,
+			DownloadAPIKeys:  []string{req.Debrid.APIKey},
+			DownloadUncached: false,
+			RateLimit:        config.DefaultRateLimit,
+		}
 
-	debrid := config.Debrid{
-		Provider:         req.Debrid.Provider,
-		Name:             req.Debrid.Provider,
-		APIKey:           req.Debrid.APIKey,
-		DownloadAPIKeys:  []string{req.Debrid.APIKey},
-		DownloadUncached: false,
-		RateLimit:        config.DefaultRateLimit,
-	}
-
-	if len(cfg.Debrids) == 0 {
-		cfg.Debrids = []config.Debrid{debrid}
+		if len(cfg.Debrids) == 0 {
+			cfg.Debrids = []config.Debrid{debrid}
+		} else {
+			cfg.Debrids[0] = debrid
+		}
 	} else {
-		cfg.Debrids[0] = debrid
+		cfg.Debrids = nil
 	}
 
-	// Step 3: Handle Download Folder
+	// Step 3: Handle Usenet Provider (optional)
+	if hasUsenet {
+		if req.Usenet.Port < 1 || req.Usenet.Port > 65535 {
+			s.sendSetupError(w, "Usenet port must be between 1 and 65535", nil)
+			return
+		}
+
+		providerMax := req.Usenet.MaxConnections
+		if providerMax <= 0 {
+			providerMax = 30
+		}
+
+		readerConnections := req.Usenet.ReaderConnections
+		if readerConnections <= 0 {
+			readerConnections = 15
+		}
+
+		cfg.Usenet.Providers = []config.UsenetProvider{{
+			Host:           req.Usenet.Host,
+			Port:           req.Usenet.Port,
+			Username:       req.Usenet.Username,
+			Password:       req.Usenet.Password,
+			MaxConnections: providerMax,
+			Priority:       1,
+		}}
+		cfg.Usenet.MaxConnections = readerConnections
+	} else {
+		cfg.Usenet.Providers = nil
+	}
+
+	// Step 4: Handle Download Folder
 	if req.Download.DownloadFolder == "" {
 		s.sendSetupError(w, "Download folder is required", nil)
 		return
@@ -185,8 +238,8 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg.Mount.Type = config.MountType(req.Mount.MountType)
 
-	if req.Mount.MountType == "dfs" {
-		// Configure DFS
+	switch req.Mount.MountType {
+	case "dfs":
 		cfg.Mount.MountPath = req.Mount.MountPath
 
 		// Create cache dir
@@ -207,15 +260,7 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 		if cfg.Mount.DFS.CacheExpiry == "" {
 			cfg.Mount.DFS.CacheExpiry = "24h"
 		}
-		if cfg.Mount.DFS.AttrTimeout == "" {
-			cfg.Mount.DFS.AttrTimeout = "1m"
-		}
-		if cfg.Mount.DFS.EntryTimeout == "" {
-			cfg.Mount.DFS.EntryTimeout = "1m"
-		}
-
-	} else if req.Mount.MountType == "rclone" {
-		// Configure Rclone
+	case "rclone":
 		cfg.Mount.MountPath = req.Mount.MountPath
 
 		if req.Mount.CacheDir != "" {
@@ -226,24 +271,18 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 		if cfg.Mount.Rclone.VfsCacheMode == "" {
 			cfg.Mount.Rclone.VfsCacheMode = "full"
 		}
-		if cfg.Mount.Rclone.VfsReadChunkSize == "" {
-			cfg.Mount.Rclone.VfsReadChunkSize = "128M"
-		}
-		if req.Mount.RcloneBufferSize != "" {
-			cfg.Mount.Rclone.BufferSize = req.Mount.RcloneBufferSize
-		} else if cfg.Mount.Rclone.BufferSize == "" {
-			cfg.Mount.Rclone.BufferSize = "128M"
-		}
 		if cfg.Mount.Rclone.DirCacheTime == "" {
 			cfg.Mount.Rclone.DirCacheTime = "5m"
 		}
 	}
 
-	// Set setup as completed
-	cfg.SetupCompleted = true
-
 	if err := cfg.Save(); err != nil {
 		s.sendSetupError(w, "Failed to save configuration", err)
+		return
+	}
+
+	if err := cfg.SetupComplete(); err != nil {
+		s.sendSetupError(w, "Setup completion validation failed", err)
 		return
 	}
 
@@ -257,38 +296,5 @@ func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(response)
-}
-
-// setupSkipHandler handles skipping the setup wizard
-func (s *Server) setupSkipHandler(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Skip bool `json:"skip"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.sendSetupError(w, "Invalid request format", err)
-		return
-	}
-
-	if !req.Skip {
-		s.sendSetupError(w, "Invalid skip setup request", nil)
-		return
-	}
-
-	cfg := config.Get()
-	cfg.SetupCompleted = true
-	if err := cfg.Save(); err != nil {
-		s.sendSetupError(w, "Failed to save configuration", err)
-		return
-	}
-
-	response := SetupWizardResponse{
-		Success:    true,
-		Message:    "Setup skipped successfully",
-		RedirectTo: "/",
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(response)
+	_ = json.ConfigDefault.NewEncoder(w).Encode(response)
 }

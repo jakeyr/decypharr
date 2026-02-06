@@ -4,189 +4,222 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
+	"sync/atomic"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/sourcegraph/conc/pool"
 )
 
-// GetBrokenFiles checks if files in a torrent are broken and attempts to fix them
-// Returns the list of broken files, or empty if successfully repaired
-// This implementation aligns with cache.GetBrokenFiles behavior
-func (m *Manager) GetBrokenFiles(entry *storage.TorrentEntry, filenames []string) []string {
-	if len(entry.Files) == 0 {
+type RepairManager interface {
+	Run(ctx context.Context)
+	AddJob(arrsNames []string, mediaIDs []string, autoProcess, recurrent bool) error
+	StopJob(id string) error
+	ProcessJob(id string) error
+	DeleteJobs(ids []string)
+	GetJobs() []*storage.Job
+	Stop()
+}
+
+func (m *Manager) GetBrokenFiles(item *storage.EntryItem, filenames []string) []string {
+	if len(item.Files) == 0 {
 		return filenames
 	}
 
-	repairStrategy := config.Get().Repair.Strategy
-	brokenFiles := make([]string, 0)
+	cfg := config.Get()
 
-	// Check which files need checking
+	repairStrategy := cfg.Repair.Strategy
+
+	// Select which files to check
 	files := make(map[string]*storage.File)
 	if len(filenames) > 0 {
 		for _, name := range filenames {
-			if f, ok := entry.Files[name]; ok {
+			if f, ok := item.Files[name]; ok {
 				files[name] = f
 			}
 		}
 	} else {
-		files = entry.Files
+		files = item.Files
 	}
 
-	torrents := make(map[string]*storage.Torrent)
-	badTorrents := make(map[string]*storage.Torrent)
+	entries := make(map[string]*storage.Entry)
+	badFiles := xsync.NewMap[string, []*storage.File]()
+
+	// First pass: load entries by infohash
 	for _, file := range files {
-		if _, ok := torrents[file.InfoHash]; !ok {
-			torrent, err := m.storage.Get(file.InfoHash)
+		if _, ok := entries[file.InfoHash]; !ok {
+			entry, err := m.storage.Get(file.InfoHash)
 			if err != nil {
-				m.logger.Error().Err(err).Str("infohash", file.InfoHash).Msg("Failed to get torrent from storage")
+				m.logger.Error().Err(err).
+					Str("infohash", file.InfoHash).
+					Msg("Failed to get entry from storage")
 				continue
 			}
-			torrents[file.InfoHash] = torrent
+			entries[file.InfoHash] = entry
 		}
 	}
 
-	// Second pass: check links validity in parallel
-	var wg sync.WaitGroup
+	// Second pass: check links in parallel using conc pool
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Use a mutex to protect brokenFiles slice and torrent-wide failure flag
-	var mu sync.Mutex
-	torrentWideFailed := false
+	torrentWideFailed := atomic.Bool{}
 
-	wg.Add(len(files))
+	handleBroken := func(file *storage.File) {
+		if repairStrategy == config.RepairStrategyPerTorrent {
+			torrentWideFailed.Store(true)
+			cancel() // stop other goroutines early
+		} else {
+			badFiles.Compute(file.InfoHash, func(oldValue []*storage.File, loaded bool) ([]*storage.File, xsync.ComputeOp) {
+				if !loaded {
+					return []*storage.File{file}, xsync.UpdateOp
+				}
+				return append(oldValue, file), xsync.UpdateOp
+			})
+		}
+	}
+
+	// Limit concurrency across all files
+	p := pool.New().
+		WithContext(ctx)
 
 	for name, file := range files {
-		go func(name string, file *storage.File) {
-			defer wg.Done()
-
+		p.Go(func(ctx context.Context) error {
+			// Respect cancellation
 			select {
 			case <-ctx.Done():
-				return
+				return ctx.Err()
 			default:
 			}
-			torrent, ok := torrents[file.InfoHash]
+
+			entry, ok := entries[file.InfoHash]
 			if !ok {
-				return
+				return nil
 			}
-			// GetReader the debrid client for link checking
-			client := m.DebridClient(torrent.ActiveDebrid)
-			if client == nil {
-				m.logger.Error().Str("debrid", torrent.ActiveDebrid).Msg("Debrid client not found")
-				return
-			}
-			placement := torrent.GetActivePlacement()
 
-			placementFile := placement.Files[name]
-			if placementFile == nil || (placementFile.Link == "" && placementFile.Id == "") {
-				mu.Lock()
-				if repairStrategy == config.RepairStrategyPerTorrent {
-					torrentWideFailed = true
-					mu.Unlock()
-					cancel() // Signal all other goroutines to stop
-					return
-				} else {
-					// per_file strategy - only mark this file as broken
-					brokenFiles = append(brokenFiles, name)
-					badTorrents[torrent.InfoHash] = torrent
+			if entry.IsNZB() && cfg.Usenet.SkipRepair {
+				// NZB repair disabled, skip checking
+				return nil
+			}
+
+			// If entry is NZB use Usenet client to check link validity
+			if entry.IsNZB() {
+				if m.usenet == nil {
+					m.logger.Error().
+						Str("infohash", entry.InfoHash).
+						Msg("Usenet client not configured, cannot check NZB links")
+					return nil
 				}
-				mu.Unlock()
-				return
+				if err := m.usenet.CheckFile(ctx, entry.InfoHash, file.Name); err != nil {
+					if errors.Is(err, customerror.UsenetSegmentMissingError) {
+						handleBroken(file)
+					}
+				}
+				return nil
 			}
 
-			// Check if the link is still valid
+			client := m.ProviderClient(entry.ActiveProvider)
+			if client == nil {
+				m.logger.Error().
+					Str("debrid", entry.ActiveProvider).
+					Msg("Provider client not found")
+				return nil
+			}
+
+			placement := entry.GetActiveProvider()
+			placementFile := placement.Files[name]
+
+			// Missing placement or link → broken
+			if placementFile == nil || (placementFile.Link == "" && placementFile.Id == "") {
+				handleBroken(file)
+				return nil
+			}
+
 			link := placementFile.Link
 			if link == "" {
 				link = placementFile.Id
 			}
+			if link == "" {
+				handleBroken(file)
+				return nil
+			}
 
-			if link != "" {
-				if err := client.CheckLink(link); err != nil {
-					if errors.Is(err, utils.HosterUnavailableError) {
-						mu.Lock()
-						if repairStrategy == config.RepairStrategyPerTorrent {
-							torrentWideFailed = true
-							mu.Unlock()
-							cancel() // Signal all other goroutines to stop
-							return
-						} else {
-							// per_file strategy - only mark this file as broken
-							brokenFiles = append(brokenFiles, name)
-							badTorrents[torrent.InfoHash] = torrent
-						}
-						mu.Unlock()
-					}
+			// Check if link is still valid
+			if err := client.CheckFile(ctx, file.InfoHash, link); err != nil {
+				if errors.Is(err, customerror.HosterUnavailableError) {
+					handleBroken(file)
 				}
 			}
-		}(name, file)
+
+			return nil
+		})
 	}
 
-	wg.Wait()
+	// We don't really care about the pool error here (ctx.err etc.)
+	_ = p.Wait()
 
-	// Handle the result based on strategy
-	if repairStrategy == config.RepairStrategyPerTorrent && torrentWideFailed {
-		// Mark all files as broken for per_torrent strategy
-		for name := range files {
-			brokenFiles = append(brokenFiles, name)
-			badTorrents = torrents
+	// Strategy: per_torrent ⇒ any failure means all files are broken
+	if repairStrategy == config.RepairStrategyPerTorrent && torrentWideFailed.Load() {
+		for _, file := range files {
+			badFiles.Compute(file.InfoHash, func(oldValue []*storage.File, loaded bool) ([]*storage.File, xsync.ComputeOp) {
+				if !loaded {
+					return []*storage.File{file}, xsync.UpdateOp
+				}
+				return append(oldValue, file), xsync.UpdateOp
+			})
 		}
 	}
-	// For per_file strategy, brokenFiles already contains only the broken ones
-
-	// Try to fix the torrent if broken files were found
-	if len(brokenFiles) > 0 {
-		m.logger.Info().
-			Int("broken_files", len(brokenFiles)).
-			Msg("Detected broken files, attempting to fix torrent")
-
-		// Use Fixer to repair the torrent
-		fixed := 0
-		for _, torrent := range badTorrents {
-			result, err := m.fixer.FixTorrent(m.ctx, torrent, false)
-			if err != nil || !result.Success {
-				m.logger.Error().
-					Err(err).
-					Msg("Failed to fix torrent")
-				return brokenFiles
+	// Time to attempt repair of bad files
+	brokenFiles := make([]string, 0)
+	badFiles.Range(func(infohash string, files []*storage.File) bool {
+		entry, err := m.storage.Get(infohash)
+		if err != nil {
+			for _, file := range files {
+				brokenFiles = append(brokenFiles, file.Name)
 			}
-			fixed++
+			return true
 		}
-		if fixed == len(badTorrents) {
-			// All bad torrents fixed
-			return []string{}
+		if entry.IsNZB() {
+			// We can't repair NZB files here
+			for _, file := range files {
+				brokenFiles = append(brokenFiles, file.Name)
+			}
+			return true
 		}
-
+		// Attempt to re-insert the torrent
+		if err = m.ReinsertEntry(context.Background(), entry); err != nil {
+			for _, file := range files {
+				brokenFiles = append(brokenFiles, file.Name)
+			}
+			return true
+		}
+		return true
+	})
+	mappedBadFiles := make(map[string]bool)
+	for _, name := range brokenFiles {
+		if _, ok := mappedBadFiles[name]; !ok {
+			mappedBadFiles[name] = true
+		}
 	}
-
-	// No broken files
-	return []string{}
+	result := make([]string, 0, len(mappedBadFiles))
+	for name := range mappedBadFiles {
+		result = append(result, name)
+	}
+	return result
 }
 
-func (m *Manager) FixTorrent(ctx context.Context, torrent *storage.Torrent) error {
-
-	result, err := m.fixer.FixTorrent(ctx, torrent, false)
+func (m *Manager) ReinsertEntry(ctx context.Context, entry *storage.Entry) error {
+	if m.fixer == nil {
+		return fmt.Errorf("fixer not initialized")
+	}
+	res, err := m.fixer.FixTorrent(ctx, entry, false)
 	if err != nil {
 		return err
 	}
-	if !result.Success {
-		return fmt.Errorf("fixing failed after %d attempts: %w", result.AttemptsCount, result.Error)
+	if !res.Success {
+		return fmt.Errorf("failed to re-insert torrent")
 	}
-	return nil
-}
-
-// MoveTorrent attempts to repair a torrent by moving it to a new debrid service
-func (m *Manager) MoveTorrent(ctx context.Context, torrent *storage.Torrent) error {
-
-	result, err := m.fixer.FixTorrent(ctx, torrent, true) // Always move to the next debrid rather than trying to fix current debrid
-	if err != nil {
-		return err
-	}
-
-	if !result.Success {
-		return fmt.Errorf("moving failed after %d attempts: %w", result.AttemptsCount, result.Error)
-	}
-
 	return nil
 }

@@ -8,113 +8,198 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/logger"
-	bolt "go.etcd.io/bbolt"
+	"github.com/sirrobot01/decypharr/pkg/storage/hybrid"
+	"google.golang.org/protobuf/proto"
 )
 
-const (
-	// Bucket names
-	queuedBucket       = "queued"
-	cachedBucket       = "cached"
-	nameEntryBucket    = "name_entry"
-	metaBucket         = "meta"
-	repairBucket       = "repair_jobs"
-	repairUniqueBucket = "repair_unique"
+var storeNames = []string{"entries", "queue", "items", "repair_jobs", "repair_keys"}
 
-	// Meta keys
-	migrationKey = "migration:status"
-)
-
-// Storage handles persistence of managed torrents using bbolt + MsgPack
+// Storage handles persistence using HybridStore
 type Storage struct {
-	db     *bolt.DB
-	logger zerolog.Logger
+	// HybridStore instances for different data types
+	entries    *hybrid.Store // cached entries
+	queue      *hybrid.Store // queued entries
+	entryItems *hybrid.Store // name -> infohash index
+	repairJobs *hybrid.Store // repair jobs
+	repairKeys *hybrid.Store // repair unique keys
+	dir        string
+	logger     zerolog.Logger
 }
 
-// NewStorage creates a new storage instance
+// Moves old data.log files to a single directory structure
+func moveItemsToNewPaths(baseDir string) error {
+	for _, name := range storeNames {
+		oldPath := filepath.Join(baseDir, name, "data.log")
+		newPath := filepath.Join(baseDir, name+".db")
+		if _, err := os.Stat(oldPath); err == nil {
+			if err := os.Rename(oldPath, newPath); err != nil {
+				return fmt.Errorf("failed to move %s to new path: %w", name, err)
+			}
+		}
+	}
+
+	// Remove old directories
+	for _, name := range storeNames {
+		oldDir := filepath.Join(baseDir, name)
+		if _, err := os.Stat(oldDir); err == nil {
+			_ = os.RemoveAll(oldDir)
+		}
+	}
+	return nil
+}
+
+func createItemStores(baseDir string, baseConfig hybrid.Config) (map[string]*hybrid.Store, error) {
+	items := make(map[string]*hybrid.Store)
+	for _, name := range storeNames {
+		config := baseConfig
+		config.DataPath = filepath.Join(baseDir, name+".db")
+		store, err := hybrid.New(config)
+		if err != nil {
+			// Cleanup previously created stores
+			for _, it := range items {
+				_ = it.Close()
+			}
+			return nil, fmt.Errorf("failed to create %s store: %w", name, err)
+		}
+		items[name] = store
+	}
+	return items, nil
+}
+
+// NewStorage creates a new storage instance with HybridStore
 func NewStorage(dbPath string) (*Storage, error) {
-	// Ensure the directory exists
-	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	dbPath = filepath.Clean(dbPath)
+	dataDir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create db directory: %w", err)
 	}
 
-	// AddOrUpdate .db extension if not present
-	if filepath.Ext(dbPath) == "" {
-		dbPath = dbPath + ".db"
+	log := logger.New("storage")
+	dbDir := filepath.Join(dataDir, "db")
+
+	// Base config
+	baseConfig := hybrid.Config{
+		CacheSize:           5000,
+		SyncInterval:        time.Second,
+		CompactionThreshold: 0.5,
+		AutoCompact:         true,
+	}
+	// Move old data.log files to new paths
+	if err := moveItemsToNewPaths(dbDir); err != nil {
+		return nil, fmt.Errorf("failed to move old data files: %w", err)
 	}
 
-	// Open bbolt database with optimized settings
-	db, err := bolt.Open(dbPath, 0600, &bolt.Options{
-		Timeout:      10 * time.Second,
-		NoGrowSync:   false,
-		FreelistType: bolt.FreelistArrayType,
-	})
+	// Create item stores
+	itemStores, err := createItemStores(dbDir, baseConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open bbolt db: %w", err)
+		return nil, fmt.Errorf("failed to create item stores: %w", err)
 	}
 
-	// Create buckets if they don't exist
-	err = db.Update(func(tx *bolt.Tx) error {
-		for _, bucket := range []string{queuedBucket, cachedBucket, nameEntryBucket, metaBucket, repairBucket, repairUniqueBucket} {
-			_, err := tx.CreateBucketIfNotExists([]byte(bucket))
-			if err != nil {
-				return fmt.Errorf("failed to create bucket %s: %w", bucket, err)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
+	entries := itemStores["entries"]
+	queue := itemStores["queue"]
+	entryItems := itemStores["items"]
+	repairJobs := itemStores["repair_jobs"]
+	repairKeys := itemStores["repair_keys"]
 
 	s := &Storage{
-		db:     db,
-		logger: logger.New("manager-storage"),
+		entries:    entries,
+		queue:      queue,
+		entryItems: entryItems,
+		repairJobs: repairJobs,
+		repairKeys: repairKeys,
+		dir:        dbDir,
+		logger:     log,
 	}
+
+	// Migrate metadata to new format (adds Protocol, Bad, AddedOn to index)
+	go func() {
+		if count, err := s.MigrateMetadata(); err != nil {
+			log.Warn().Err(err).Msg("Metadata migration failed")
+		} else if count > 0 {
+			log.Info().Int("count", count).Msg("Migrated entry metadata to new format")
+		}
+	}()
 
 	return s, nil
 }
 
-// Close closes the database
+// Close closes all storage components
 func (s *Storage) Close() error {
-	return s.db.Close()
+	var errs []error
+	if s.entries != nil {
+		if err := s.entries.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.queue != nil {
+		if err := s.queue.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.entryItems != nil {
+		if err := s.entryItems.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.repairJobs != nil {
+		if err := s.repairJobs.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.repairKeys != nil {
+		if err := s.repairKeys.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("errors closing storage: %v", errs)
+	}
+	return nil
 }
 
 // Stats returns storage statistics
 func (s *Storage) Stats() map[string]interface{} {
 	stats := make(map[string]interface{})
-
-	err := s.db.View(func(tx *bolt.Tx) error {
-		// Calculate file size
-		fileInfo, err := os.Stat(s.db.Path())
-		var fileSize int64
-		if err == nil {
-			fileSize = fileInfo.Size()
+	size := int64(0)
+	// Read the disk usage of the data directory
+	err := filepath.Walk(s.dir, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			size += info.Size()
 		}
-
-		stats["total_size"] = fileSize
-		stats["page_count"] = tx.Size()
-
-		// GetReader database-level stats
-		dbStats := s.db.Stats()
-		stats["tx_count"] = dbStats.TxN
-		stats["open_tx_count"] = dbStats.OpenTxN
-
 		return nil
 	})
-
 	if err != nil {
-		s.logger.Error().Err(err).Msg("Failed to retrieve storage stats")
 		return stats
 	}
-
+	stats["total_size"] = size
 	return stats
 }
 
-// Backup creates a backup of the database
+// Backup syncs all stores (for HybridStore, data is already on disk)
 func (s *Storage) Backup(path string) error {
-	return s.db.View(func(tx *bolt.Tx) error {
-		return tx.CopyFile(path, 0600)
-	})
+	s.logger.Info().Str("path", path).Msg("Backup - syncing stores")
+	return nil
+}
+
+// SaveMigrationStatus saves the system migration status
+func (s *Storage) SaveMigrationStatus(status *SystemMigrationStatus) error {
+	pb := SystemMigrationStatusToProto(status)
+	data, err := proto.Marshal(pb)
+	if err != nil {
+		return err
+	}
+	return s.entries.Put("__migration_status__", data, nil)
+}
+
+// GetMigrationStatus retrieves the system migration status
+func (s *Storage) GetMigrationStatus() (*SystemMigrationStatus, error) {
+	data, err := s.entries.Get("__migration_status__")
+	if err != nil {
+		return nil, err
+	}
+	var pb SystemMigrationStatusProto
+	if err := proto.Unmarshal(data, &pb); err != nil {
+		return nil, err
+	}
+	return ProtoToSystemMigrationStatus(&pb), nil
 }

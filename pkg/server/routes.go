@@ -30,7 +30,6 @@ func (s *Server) WebRoutes() http.Handler {
 	// Setup wizard - public, no auth required
 	r.Get("/setup", s.SetupHandler)
 	r.Post("/api/setup/complete", s.setupCompleteHandler)
-	r.Post("/api/setup/skip", s.setupSkipHandler)
 
 	// Protected routes - require auth
 	r.Group(func(r chi.Router) {

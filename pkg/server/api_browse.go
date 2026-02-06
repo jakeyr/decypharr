@@ -1,20 +1,23 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
-	"mime"
+	json "github.com/bytedance/sonic"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 // BrowseEntry represents a file or folder in the browse view
 type BrowseEntry struct {
+	Infohash     string `json:"infohash,omitempty"`
 	Name         string `json:"name"`
 	Path         string `json:"path"`
 	Size         int64  `json:"size"`
@@ -120,7 +123,6 @@ func (s *Server) handleBrowseGroup(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// GetReader torrent info hash for deletion support
-		infoHash := ""
 		canDelete := false
 		if child.IsDir() {
 			canDelete = true
@@ -132,7 +134,7 @@ func (s *Server) handleBrowseGroup(w http.ResponseWriter, r *http.Request) {
 			Size:         child.Size(),
 			ModTime:      child.ModTime().Format("2006-01-02 15:04:05"),
 			IsDir:        child.IsDir(),
-			InfoHash:     infoHash,
+			InfoHash:     child.InfoHash(),
 			CanDelete:    canDelete,
 			ActiveDebrid: child.ActiveDebrid(),
 		})
@@ -250,15 +252,15 @@ func (s *Server) handleDeleteBrowseTorrent(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := s.manager.DeleteTorrent(id, true); err != nil {
-		s.logger.Error().Err(err).Str("id", id).Msg("Failed to delete torrent")
-		http.Error(w, "Failed to delete torrent", http.StatusInternalServerError)
+	if err := s.manager.DeleteEntry(id, true); err != nil {
+		s.logger.Error().Err(err).Str("id", id).Msg("Failed to delete entry")
+		http.Error(w, "Failed to delete entry", http.StatusInternalServerError)
 		return
 	}
 
 	utils.JSONResponse(w, map[string]interface{}{
 		"success": true,
-		"message": "Torrent deleted successfully",
+		"message": "Item deleted successfully",
 	}, http.StatusOK)
 }
 
@@ -268,7 +270,7 @@ func (s *Server) handleBatchDeleteBrowseTorrents(w http.ResponseWriter, r *http.
 		IDs []string `json:"ids"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
@@ -305,7 +307,7 @@ func (s *Server) handleMoveTorrent(w http.ResponseWriter, r *http.Request) {
 		WaitComplete bool   `json:"wait_complete"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
@@ -337,7 +339,7 @@ func (s *Server) handleGetTorrentInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	torrent, err := s.manager.GetTorrent(id)
+	torrent, err := s.manager.GetEntry(id)
 	if err != nil {
 		s.logger.Error().Err(err).Str("id", id).Msg("Failed to get torrent")
 		http.Error(w, "Torrent not found", http.StatusNotFound)
@@ -346,8 +348,8 @@ func (s *Server) handleGetTorrentInfo(w http.ResponseWriter, r *http.Request) {
 
 	// GetReader available debrids for move operation
 	debrids := make([]string, 0)
-	for debridName := range torrent.Placements {
-		if debridName != torrent.ActiveDebrid {
+	for debridName := range torrent.Providers {
+		if debridName != torrent.ActiveProvider {
 			debrids = append(debrids, debridName)
 		}
 	}
@@ -356,50 +358,73 @@ func (s *Server) handleGetTorrentInfo(w http.ResponseWriter, r *http.Request) {
 		"info_hash":         torrent.InfoHash,
 		"name":              torrent.Name,
 		"size":              torrent.Size,
-		"active_debrid":     torrent.ActiveDebrid,
+		"active_debrid":     torrent.ActiveProvider,
 		"status":            torrent.Status,
 		"available_debrids": debrids,
-		"placements":        torrent.Placements,
+		"placements":        torrent.Providers,
 	}, http.StatusOK)
 }
 
-// handleDownloadFile proxies file download
+// handleDownloadFile proxies file download for both torrents and NZBs
 func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	torrentName := utils.PathUnescape(chi.URLParam(r, "torrent"))
 	fileName := utils.PathUnescape(chi.URLParam(r, "file"))
 
-	torrent, err := s.manager.GetTorrentByFileName(torrentName, fileName)
-	if err != nil || torrent == nil {
+	entry, err := s.manager.GetEntryByName(torrentName, fileName)
+	if err != nil || entry == nil {
 		http.Error(w, "Torrent not found", http.StatusNotFound)
 		return
 	}
 
-	file, err := torrent.GetFile(fileName)
+	file, err := entry.GetFile(fileName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 
-	etag := fmt.Sprintf("\"%x-%x\"", torrent.AddedOn.Unix(), file.Size)
+	etag := fmt.Sprintf("\"%x-%x\"", entry.AddedOn.Unix(), file.Size)
 	w.Header().Set("ETag", etag)
-	w.Header().Set("Last-Modified", torrent.AddedOn.UTC().Format(http.TimeFormat))
+	w.Header().Set("Last-Modified", entry.AddedOn.UTC().Format(http.TimeFormat))
 
-	ext := filepath.Ext(file.Name)
-	if contentType := mime.TypeByExtension(ext); contentType != "" {
-		w.Header().Set("Content-Type", contentType)
-	} else {
-		w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Type", utils.GetContentType(file.Name))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", file.Name))
+
+	switch entry.Protocol {
+	case config.ProtocolTorrent:
+		s.handleTorrentDownload(w, r, entry, file)
+		return
+	case config.ProtocolNZB:
+		s.handleUsenetDownload(w, r, torrentName, file)
+		return
+	default:
+		s.logger.Error().Msgf("Unsupported protocol: %s for %s/%s", entry.Protocol, entry.Name, fileName)
+		http.Error(w, "Unsupported protocol", http.StatusPreconditionFailed)
+		return
 	}
+}
 
-	link, err := s.manager.GetDownloadLink(torrent, fileName)
+func (s *Server) handleTorrentDownload(w http.ResponseWriter, r *http.Request, entry *storage.Entry, file *storage.File) {
+	// For torrents, get debrid download link and redirect
+	link, err := s.manager.GetDownloadLink(r.Context(), entry, file.Name)
 	if err != nil || link.Empty() {
-		s.logger.Error().Err(err).Str("torrent", torrent.Name).Str("file", file.Name).Msg("Failed to get download link")
+		s.logger.Error().Err(err).Str("torrent", entry.Name).Str("file", file.Name).Msg("Failed to get download link")
 		http.Error(w, "Could not fetch download link", http.StatusPreconditionFailed)
 		return
 	}
 
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", file.Name))
 	w.Header().Set("X-Accel-Redirect", link.DownloadLink)
 	w.Header().Set("X-Accel-Buffering", "no")
 	http.Redirect(w, r, link.DownloadLink, http.StatusFound)
+}
+
+func (s *Server) handleUsenetDownload(w http.ResponseWriter, r *http.Request, entryName string, file *storage.File) {
+	w.Header().Set("Content-Type", utils.GetContentType(file.Name))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", file.Name))
+	w.Header().Set("Content-Length", strconv.FormatInt(file.Size, 10))
+
+	err := s.manager.Usenet().Download(r.Context(), file.InfoHash, file.Name, w, nil)
+	if err != nil && !customerror.IsSilentError(err) {
+		s.logger.Error().Err(err).Msg("Download failed")
+		// Can't send HTTP error after headers are sent
+	}
 }

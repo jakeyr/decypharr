@@ -1,13 +1,12 @@
 package manager
 
 import (
-	"cmp"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/version"
 )
@@ -16,6 +15,7 @@ const (
 	EntryAllFolder     string = "__all__"
 	EntryBadFolder     string = "__bad__"
 	EntryTorrentFolder string = "torrents"
+	EntryNZBFolder     string = "nzbs"
 )
 
 // FileInfo implements os.FileInfo
@@ -30,6 +30,8 @@ type FileInfo struct {
 	activeDebrid string
 	canDelete    bool
 	byteRange    *[2]int64
+	infohash     string
+	sys          interface{} // For caching fuse nodes
 }
 
 func (f *FileInfo) Name() string         { return f.name }
@@ -37,52 +39,29 @@ func (f *FileInfo) Size() int64          { return f.size }
 func (f *FileInfo) Mode() os.FileMode    { return f.mode }
 func (f *FileInfo) ModTime() time.Time   { return f.modTime }
 func (f *FileInfo) IsDir() bool          { return f.isDir }
-func (f *FileInfo) Sys() interface{}     { return nil }
+func (f *FileInfo) Sys() interface{}     { return f.sys }
+func (f *FileInfo) SetSys(v interface{}) { f.sys = v }
 func (f *FileInfo) Content() []byte      { return f.content }
 func (f *FileInfo) Parent() string       { return f.parent }
 func (f *FileInfo) ActiveDebrid() string { return f.activeDebrid }
 func (f *FileInfo) CanDelete() bool      { return f.canDelete }
 func (f *FileInfo) IsRemote() bool       { return len(f.content) == 0 }
 func (f *FileInfo) ByteRange() *[2]int64 { return f.byteRange }
+func (f *FileInfo) InfoHash() string     { return f.infohash }
 
 // GetTorrentMountPath returns the full mount path for a torrent
 // Returns the path based on the new unified mount structure
-func (m *Manager) GetTorrentMountPath(torrent *storage.Torrent) string {
-	defaultDebrid := cmp.Or(m.firstDebrid, torrent.ActiveDebrid)
-	return filepath.Join(m.config.Mount.MountPath, defaultDebrid, EntryAllFolder, torrent.GetFolder())
+func (m *Manager) GetTorrentMountPath(torrent *storage.Entry) string {
+	return filepath.Join(m.config.Mount.MountPath, EntryAllFolder, torrent.GetFolder())
 }
 
 func (m *Manager) setMountPaths() {
-	cfg := config.Get()
-	mountPaths := make(map[string]*FileInfo)
-	for _, dc := range cfg.Debrids {
-		mountPaths[dc.Name] = &FileInfo{
-			name:    dc.Name,
-			size:    0,
-			modTime: time.Now(),
-			isDir:   true,
-		}
-	}
-
 	m.rootInfo = &FileInfo{
 		name:    "",
 		size:    0,
-		modTime: time.Now(),
+		modTime: utils.Now(),
 		isDir:   true,
 	}
-
-	m.mountPaths = mountPaths
-}
-
-func (m *Manager) MountPaths() map[string]*FileInfo {
-	return m.mountPaths
-}
-
-func (m *Manager) FirstMountInfo() *FileInfo {
-	if m.firstDebrid == "" {
-		return nil
-	}
-	return m.mountPaths[m.firstDebrid]
 }
 
 func (m *Manager) RootInfo() *FileInfo {
@@ -90,42 +69,24 @@ func (m *Manager) RootInfo() *FileInfo {
 		m.rootInfo = &FileInfo{
 			name:    "",
 			size:    0,
-			modTime: time.Now(),
+			modTime: utils.Now(),
 			isDir:   true,
 		}
 	}
 	return m.rootInfo
 }
 
-// RootEntryChildren returns a list of parent directories used in the mount structure
-// These are like /mnt/remote/realdebrid
-func (m *Manager) RootEntryChildren() []FileInfo {
-	infos := make([]FileInfo, 0, len(m.mountPaths))
-	for _, mount := range m.mountPaths {
-		infos = append(infos, *mount)
-	}
-	return infos
-}
-
-func (m *Manager) GetMountInfo(name string) *FileInfo {
-	mount, ok := m.mountPaths[name]
-	if !ok {
-		return nil
-	}
-	return mount
-}
-
 // GetEntries returns the subdirectories under a given mount name
-// For the mount named "realdebrid", it would show __all__, __bad__, and any custom folders
-// For the new "manager" mount, it would show "torrents"
+// it would show __all__, __bad__, torrents, nzbs and any custom folders
 func (m *Manager) GetEntries() []FileInfo {
+	now := utils.Now()
 	var subDirs []FileInfo
-	extras := []string{EntryAllFolder, EntryBadFolder, EntryTorrentFolder}
+	extras := []string{EntryAllFolder, EntryBadFolder, EntryTorrentFolder, EntryNZBFolder}
 	for _, dir := range extras {
 		subDirs = append(subDirs, FileInfo{
 			name:    dir,
 			isDir:   true,
-			modTime: time.Now(),
+			modTime: now,
 			size:    0,
 		})
 	}
@@ -135,7 +96,7 @@ func (m *Manager) GetEntries() []FileInfo {
 			subDirs = append(subDirs, FileInfo{
 				name:    folderName,
 				isDir:   true,
-				modTime: time.Now(),
+				modTime: now,
 				size:    0,
 			})
 		}
@@ -145,7 +106,7 @@ func (m *Manager) GetEntries() []FileInfo {
 	subDirs = append(subDirs, FileInfo{
 		name:    "version.txt",
 		isDir:   false,
-		modTime: time.Now(),
+		modTime: now,
 		size:    int64(len(version.GetInfo().String())),
 		content: []byte(version.GetInfo().Version),
 	})
@@ -168,8 +129,34 @@ func (m *Manager) GetTorrentEntry(torrentName string) (*FileInfo, error) {
 	return current, nil
 }
 
+// GetEntryInfo returns a FileInfo for a torrent/entry by name - O(1) lookup
+func (m *Manager) GetEntryInfo(name string) (*FileInfo, error) {
+	entry, err := m.storage.GetEntryItem(name)
+	if err != nil {
+		return nil, fmt.Errorf("entry %s not found", name)
+	}
+
+	// get metadata from first file (all files in an entry share the same parent entry)
+	var modTime time.Time
+	var infohash string
+	for _, f := range entry.Files {
+		modTime = f.AddedOn
+		infohash = f.InfoHash
+		break
+	}
+
+	return &FileInfo{
+		infohash:  infohash,
+		name:      entry.Name,
+		size:      entry.Size,
+		modTime:   modTime,
+		isDir:     true,
+		canDelete: true,
+	}, nil
+}
+
 func (m *Manager) GetTorrentFile(torrentName, fileName string) (*FileInfo, error) {
-	entry, err := m.storage.GetEntry(torrentName)
+	entry, err := m.storage.GetEntryItem(torrentName)
 	if err != nil {
 		return nil, fmt.Errorf("torrent %s not found", torrentName)
 	}
@@ -178,6 +165,7 @@ func (m *Manager) GetTorrentFile(torrentName, fileName string) (*FileInfo, error
 		return nil, fmt.Errorf("file %s not found in torrent %s", fileName, torrentName)
 	}
 	return &FileInfo{
+		infohash:  file.InfoHash,
 		name:      file.Name,
 		size:      file.Size,
 		modTime:   file.AddedOn,
@@ -189,25 +177,27 @@ func (m *Manager) GetTorrentFile(torrentName, fileName string) (*FileInfo, error
 }
 
 // getEntryChildren
-// Groups are __all__, __bad__, custom folders, and paginated
+// Groups are __all__, __bad__, custom folders
+// Uses metadata-only iteration (no disk reads, no protobuf deserialization)
 func (m *Manager) getEntryChildren(group string) (*FileInfo, []FileInfo) {
 	currentDir := &FileInfo{
 		name:    group,
 		size:    0,
-		modTime: time.Now(),
+		modTime: utils.Now(),
 		isDir:   true,
 	}
 	switch group {
-	case EntryAllFolder, EntryTorrentFolder:
-		// This returns all torrents - using streaming to avoid loading all into memory
+	case EntryAllFolder:
+		// This returns all entries - using metadata-only iteration (no disk reads)
 		var infos []FileInfo
-		err := m.storage.ForEach(func(t *storage.Torrent) error {
+		err := m.storage.ForEachMeta(func(meta *storage.EntryMetaInfo) error {
 			infos = append(infos, FileInfo{
-				name:         t.GetFolder(),
-				size:         t.Size,
-				modTime:      t.AddedOn,
+				infohash:     meta.InfoHash,
+				name:         meta.Name,
+				size:         meta.Size,
+				modTime:      meta.AddedOn,
 				isDir:        true,
-				activeDebrid: t.ActiveDebrid,
+				activeDebrid: meta.Provider,
 				canDelete:    true,
 			})
 			return nil
@@ -216,17 +206,60 @@ func (m *Manager) getEntryChildren(group string) (*FileInfo, []FileInfo) {
 			return nil, nil
 		}
 		return currentDir, infos
-	case EntryBadFolder:
-		// Filter for bad torrents - using streaming
+	case EntryTorrentFolder:
+		// This returns all torrents - using metadata-only iteration
 		var infos []FileInfo
-		err := m.storage.ForEach(func(t *storage.Torrent) error {
-			if t.Bad {
+		err := m.storage.ForEachMeta(func(meta *storage.EntryMetaInfo) error {
+			if meta.Protocol == "torrent" {
 				infos = append(infos, FileInfo{
-					name:         t.GetFolder(),
-					size:         t.Size,
-					modTime:      t.AddedOn,
+					infohash:     meta.InfoHash,
+					name:         meta.Name,
+					size:         meta.Size,
+					modTime:      meta.AddedOn,
 					isDir:        true,
-					activeDebrid: t.ActiveDebrid,
+					activeDebrid: meta.Provider,
+					canDelete:    true,
+				})
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, nil
+		}
+		return currentDir, infos
+	case EntryNZBFolder:
+		// This returns all nzbs - using metadata-only iteration
+		var infos []FileInfo
+		err := m.storage.ForEachMeta(func(meta *storage.EntryMetaInfo) error {
+			if meta.Protocol == "nzb" {
+				infos = append(infos, FileInfo{
+					infohash:     meta.InfoHash,
+					name:         meta.Name,
+					size:         meta.Size,
+					modTime:      meta.AddedOn,
+					isDir:        true,
+					activeDebrid: meta.Provider,
+					canDelete:    true,
+				})
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, nil
+		}
+		return currentDir, infos
+	case EntryBadFolder:
+		// Filter for bad entries - using metadata-only iteration
+		var infos []FileInfo
+		err := m.storage.ForEachMeta(func(meta *storage.EntryMetaInfo) error {
+			if meta.Bad {
+				infos = append(infos, FileInfo{
+					infohash:     meta.InfoHash,
+					name:         meta.Name,
+					size:         meta.Size,
+					modTime:      meta.AddedOn,
+					isDir:        true,
+					activeDebrid: meta.Provider,
 					canDelete:    true,
 				})
 			}
@@ -249,7 +282,7 @@ func (m *Manager) getEntryChildren(group string) (*FileInfo, []FileInfo) {
 
 func (m *Manager) getTorrentChildren(name string) (*FileInfo, []FileInfo) {
 	// Find the torrent by folder name
-	entry, err := m.storage.GetEntry(name)
+	entry, err := m.storage.GetEntryItem(name)
 	if err != nil || entry == nil {
 		return nil, nil
 	}
@@ -268,6 +301,9 @@ func (m *Manager) getTorrentChildren(name string) (*FileInfo, []FileInfo) {
 			byteRange: file.ByteRange,
 		})
 		size += file.Size
+	}
+	if len(infos) == 0 {
+		return nil, nil
 	}
 
 	currentDir := &FileInfo{
@@ -289,8 +325,8 @@ func (m *Manager) RemoveEntry(entry *FileInfo) error {
 
 	if entry.isDir {
 		// This is a torrent folder
-		m.logger.Debug().Str("torrent", entry.name).Msg("Removing torrent folder")
-		et, err := m.storage.GetEntry(entry.name)
+		m.logger.Debug().Str("entry", entry.name).Msg("Removing entry folder")
+		et, err := m.storage.GetEntryItem(entry.name)
 		if err != nil {
 			return fmt.Errorf("torrent %s not found", entry.name)
 		}
@@ -302,7 +338,7 @@ func (m *Manager) RemoveEntry(entry *FileInfo) error {
 		if err != nil {
 			return fmt.Errorf("failed to get first file of torrent %s: %w", entry.name, err)
 		}
-		return m.DeleteTorrent(firstFile.InfoHash, true)
+		return m.DeleteEntry(firstFile.InfoHash, true)
 	}
 	// This is a file within a torrent
 	return m.RemoveTorrentFile(entry.Parent(), entry.Name())
@@ -328,12 +364,12 @@ func (m *Manager) CopyEntry(entry *FileInfo, destPath string, delete bool) error
 	//	newTorrent.Folder = filepath.Base(destPath)
 	//	// Set a new infohash to avoid conflicts
 	//	newTorrent.InfoHash = utils.GenerateInfoHash()
-	//	err = m.AddOrUpdate(&newTorrent, func(t *storage.Torrent) {
+	//	err = m.AddOrUpdate(&newTorrent, func(t *storage.Entry) {
 	//		m.RefreshEntries(true)
 	//	})
 	//	if delete {
 	//		// Delete the original torrent
-	//		err = m.DeleteTorrent(torr.InfoHash, false) // do not delete from debrid
+	//		err = m.DeleteEntry(torr.InfoHash, false) // do not delete from debrid
 	//	}
 	//	return err
 	//}
@@ -352,7 +388,7 @@ func (m *Manager) CopyEntry(entry *FileInfo, destPath string, delete bool) error
 	//newFile.Name = filepath.Base(destPath)
 	//// Add the new file to the torrent
 	//torr.Files[newFile.Name] = &newFile
-	//err = m.AddOrUpdate(torr, func(t *storage.Torrent) {
+	//err = m.AddOrUpdate(torr, func(t *storage.Entry) {
 	//	m.RefreshEntries(true)
 	//})
 	//if delete {
@@ -360,11 +396,10 @@ func (m *Manager) CopyEntry(entry *FileInfo, destPath string, delete bool) error
 	//	err = m.RemoveTorrentFile(torr.Folder, file.Name)
 	//}
 	return fmt.Errorf("copying entries is not supported yet")
-
 }
 
 func (m *Manager) RemoveTorrentFile(torrentName, filename string) error {
-	entry, err := m.storage.GetEntry(torrentName)
+	entry, err := m.storage.GetEntryItem(torrentName)
 	if err != nil {
 		return fmt.Errorf("torrent %s not found", torrentName)
 	}
@@ -376,20 +411,20 @@ func (m *Manager) RemoveTorrentFile(torrentName, filename string) error {
 	entry.Files[filename] = file
 
 	// GetReader torrent here
-	torrent, err := m.GetTorrent(file.InfoHash)
+	torrent, err := m.GetEntry(file.InfoHash)
 	if err != nil {
 		return fmt.Errorf("failed to get torrent %s: %w", torrentName, err)
 	}
 
 	// If the torrent has no files left, delete it
 	if len(torrent.GetActiveFiles()) == 0 {
-		m.logger.Debug().Msgf("Torrent %s has no files left, deleting it", torrent.InfoHash)
-		if err := m.DeleteTorrent(torrent.InfoHash, true); err != nil {
+		m.logger.Debug().Msgf("Entry %s has no files left, deleting it", torrent.InfoHash)
+		if err := m.DeleteEntry(torrent.InfoHash, true); err != nil {
 			return fmt.Errorf("failed to delete torrent %s: %w", torrent.InfoHash, err)
 		}
 		return nil
 	}
-	return m.AddOrUpdate(torrent, func(t *storage.Torrent) {
+	return m.AddOrUpdate(torrent, func(t *storage.Entry) {
 		m.RefreshEntries(true)
 	})
 }
@@ -400,22 +435,23 @@ func (m *Manager) getCustomFolderChildren(folder string) []FileInfo {
 		return nil
 	}
 
-	// Use streaming to avoid loading all torrents into memory
+	// Use metadata-only iteration (no disk reads)
 	var infos []FileInfo
-	err := m.storage.ForEach(func(t *storage.Torrent) error {
-		if t.Bad {
+	err := m.storage.ForEachMeta(func(meta *storage.EntryMetaInfo) error {
+		if meta.Bad {
 			return nil
 		}
 		if m.customFolders.matchesFilter(folder, &FileInfo{
-			name: t.GetFolder(),
-			size: t.Size,
-		}, t.AddedOn) {
+			name: meta.Name,
+			size: meta.Size,
+		}, meta.AddedOn) {
 			infos = append(infos, FileInfo{
-				name:         t.GetFolder(),
-				size:         t.Size,
-				modTime:      t.AddedOn,
+				infohash:     meta.InfoHash,
+				name:         meta.Name,
+				size:         meta.Size,
+				modTime:      meta.AddedOn,
 				isDir:        true,
-				activeDebrid: t.ActiveDebrid,
+				activeDebrid: meta.Provider,
 				canDelete:    true,
 			})
 		}

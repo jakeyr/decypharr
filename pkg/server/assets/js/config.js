@@ -3,6 +3,7 @@ class ConfigManager {
     constructor() {
         this.debridCount = 0;
         this.arrCount = 0;
+        this.usenetProviderCount = 0;
         this.debridDirectoryCounts = {};
         this.directoryFilterCounts = {};
         this.virtualFolderCount = 0;
@@ -13,9 +14,11 @@ class ConfigManager {
             debridConfigs: document.getElementById('debridConfigs'),
             arrConfigs: document.getElementById('arrConfigs'),
             virtualFoldersContainer: document.getElementById('virtualFoldersContainer'),
+            usenetProviders: document.getElementById('usenetProviders'),
             addDebridBtn: document.getElementById('addDebridBtn'),
             addArrBtn: document.getElementById('addArrBtn'),
-            addVirtualFolderBtn: document.getElementById('addVirtualFolderBtn')
+            addVirtualFolderBtn: document.getElementById('addVirtualFolderBtn'),
+            addUsenetProviderBtn: document.getElementById('addUsenetProviderBtn')
         };
 
         this.init();
@@ -44,6 +47,7 @@ class ConfigManager {
         this.refs.addDebridBtn.addEventListener('click', () => this.addDebridConfig());
         this.refs.addArrBtn.addEventListener('click', () => this.addArrConfig());
         this.refs.addVirtualFolderBtn.addEventListener('click', () => this.addVirtualFolder());
+        this.refs.addUsenetProviderBtn.addEventListener('click', () => this.addUsenetProvider());
     }
 
     async loadConfiguration() {
@@ -71,6 +75,11 @@ class ConfigManager {
             config.debrids.forEach(debrid => this.addDebridConfig(debrid));
         }
 
+        // Load usenet config
+        if (config.usenet) {
+            this.populateUsenetSettings(config.usenet);
+        }
+
         // Load virtual folders
         if (config.custom_folders) {
             this.populateVirtualFolders(config.custom_folders);
@@ -89,14 +98,18 @@ class ConfigManager {
 
         // Load API token info
         this.populateAPIToken(config);
+
+        // Load notifications config
+        this.populateNotificationSettings(config.notifications);
     }
 
     populateGeneralSettings(config) {
         const fields = [
             'log_level', 'url_base', 'bind_address', 'port',
-            'discord_webhook_url', 'min_file_size', 'max_file_size', 'remove_stalled_after',
-            'download_folder', 'refresh_interval', 'max_downloads', 'skip_pre_cache',
-            'always_rm_tracker_urls', 'folder_naming', 'refresh_dirs'
+            'min_file_size', 'max_file_size', 'remove_stalled_after',
+            'nzb_user_agent', 'download_folder', 'refresh_interval',
+            'max_downloads', 'skip_pre_cache', 'always_rm_tracker_urls',
+            'folder_naming', 'refresh_dirs'
         ];
 
         fields.forEach(field => {
@@ -115,7 +128,7 @@ class ConfigManager {
     populateRepairSettings(repairConfig) {
         if (!repairConfig) return;
 
-        const fields = ['enabled', 'interval', 'workers', 'strategy', 'auto_process', 'repair_mode'];
+        const fields = ['enabled', 'interval', 'workers', 'strategy', 'auto_process'];
 
         fields.forEach(field => {
             const element = document.querySelector(`[name="repair.${field}"]`);
@@ -127,6 +140,38 @@ class ConfigManager {
                 }
             }
         });
+    }
+
+    populateNotificationSettings(notificationsConfig) {
+        if (!notificationsConfig) return;
+
+        // Handle enabled checkbox
+        const enabledElement = document.getElementById('notifications.enabled');
+        if (enabledElement) {
+            enabledElement.checked = notificationsConfig.enabled || false;
+        }
+
+        // Handle webhook URL
+        const webhookElement = document.getElementById('notifications.webhook_url');
+        if (webhookElement && notificationsConfig.webhook_url) {
+            webhookElement.value = notificationsConfig.webhook_url;
+        }
+
+        // Handle callback URL
+        const callbackElement = document.getElementById('notifications.callback_url');
+        if (callbackElement && notificationsConfig.callback_url) {
+            callbackElement.value = notificationsConfig.callback_url;
+        }
+
+        // Handle events checkboxes
+        if (notificationsConfig.events && Array.isArray(notificationsConfig.events)) {
+            notificationsConfig.events.forEach(event => {
+                const checkbox = document.querySelector(`input[name="notifications.events[]"][value="${event}"]`);
+                if (checkbox) {
+                    checkbox.checked = true;
+                }
+            });
+        }
     }
 
     populateMountSettings(mountConfig) {
@@ -184,9 +229,8 @@ class ConfigManager {
 
         const fields = [
             'cache_dir', 'disk_cache_size', 'cache_expiry', 'cache_cleanup_interval',
-            'chunk_size', 'read_ahead_size', 'max_concurrent_reads', 'daemon_timeout',
+            'chunk_size', 'read_ahead_size', 'daemon_timeout',
             'uid', 'gid', 'umask', 'allow_other', 'default_permissions',
-            'attr_timeout', 'entry_timeout', 'negative_timeout'
         ];
 
         fields.forEach(field => {
@@ -294,7 +338,7 @@ class ConfigManager {
                 <div class="flex justify-between items-start mb-4">
                     <h3 class="card-title text-lg">
                         <i class="bi bi-cloud mr-2 text-secondary"></i>
-                        Debrid Service #${index + 1}
+                        Debrid #${index + 1}
                     </h3>
                     <button type="button" class="btn btn-error btn-sm" onclick="this.closest('.debrid-config').remove();">
                         <i class="bi bi-trash"></i>
@@ -393,6 +437,15 @@ class ConfigManager {
                                        name="debrid[${index}].proxy" id="debrid[${index}].proxy" 
                                        placeholder="socks4, socks5, https proxy">
                                 <span class="text-sm opacity-70">This proxy is used for this debrid account</span>
+                            </div>
+                            <div>
+                                <label class="label" for="debrid[${index}].user_agent">
+                                    <span class=" font-medium">Custom User Agent</span>
+                                </label>
+                                <input type="text" class="input w-full" 
+                                       name="debrid[${index}].user_agent" id="debrid[${index}].user_agent" 
+                                       placeholder="Decypharr/1.0">
+                                <span class="text-sm opacity-70">Custom User Agent for this debrid</span>
                             </div>
                             <div>
                                 <label class="label" for="debrid[${index}].minimum_free_slot">
@@ -893,7 +946,7 @@ class ConfigManager {
 
                         <div>
                             <label class="label" for="arr[${index}].selected_debrid">
-                                <span class=" font-medium">Preferred Debrid Service</span>
+                                <span class=" font-medium">Preferred Provider</span>
                             </label>
                             <select class="select w-full" name="arr[${index}].selected_debrid" id="arr[${index}].selected_debrid">
                                 <option value="">Auto Select</option>
@@ -1026,18 +1079,17 @@ class ConfigManager {
     collectFormData() {
         return {
             // General settings
-            log_level: document.getElementById('log-level').value,
-            url_base: document.getElementById('urlBase').value,
-            bind_address: document.getElementById('bindAddress').value,
-            app_url: document.getElementById('appUrl').value,
-            port: document.getElementById('port').value ? document.getElementById('port').value : null,
-            discord_webhook_url: document.getElementById('discordWebhookUrl').value,
-            allowed_file_types: document.getElementById('allowedExtensions').value
+            log_level: document.querySelector('[name="log_level"]').value,
+            url_base: document.querySelector('[name="url_base"]').value,
+            bind_address: document.querySelector('[name="bind_address"]').value,
+            app_url: document.querySelector('[name="app_url"]').value,
+            port: document.querySelector('[name="port"]').value,
+            allowed_file_types: document.querySelector('[name="allowed_file_types"]').value
                 .split(',').map(ext => ext.trim()).filter(Boolean),
-            min_file_size: document.getElementById('minFileSize').value,
-            max_file_size: document.getElementById('maxFileSize').value,
-            remove_stalled_after: document.getElementById('removeStalledAfter').value,
-            callback_url: document.getElementById('callbackUrl').value,
+            min_file_size: document.querySelector('[name="min_file_size"]').value,
+            max_file_size: document.querySelector('[name="max_file_size"]').value,
+            remove_stalled_after: document.querySelector('[name="remove_stalled_after"]').value || "10m",
+            nzb_user_agent: document.querySelector('[name="nzb_user_agent"]').value,
             download_folder: document.querySelector('[name="download_folder"]').value,
             refresh_interval: document.querySelector('[name="refresh_interval"]').value || "30s",
             max_downloads: parseInt(document.querySelector('[name="max_downloads"]').value) || 0,
@@ -1057,7 +1109,62 @@ class ConfigManager {
             repair: this.collectRepairConfig(),
 
             // Mount configuration
-            mount: this.collectMountConfig()
+            mount: this.collectMountConfig(),
+
+            // Collect usenet configs
+            usenet: this.collectUsenetConfig(),
+
+            // Collect notifications config
+            notifications: this.collectNotificationsConfig()
+        };
+    }
+
+    collectNotificationsConfig() {
+        const enabledElement = document.getElementById('notifications.enabled');
+        const webhookElement = document.getElementById('notifications.webhook_url');
+        const callbackElement = document.getElementById('notifications.callback_url');
+
+        // Collect selected events
+        const events = [];
+        document.querySelectorAll('input[name="notifications.events[]"]').forEach(checkbox => {
+            if (checkbox.checked) {
+                events.push(checkbox.value);
+            }
+        });
+
+        return {
+            enabled: enabledElement ? enabledElement.checked : false,
+            webhook_url: webhookElement ? webhookElement.value : '',
+            callback_url: callbackElement ? callbackElement.value : '',
+            events: events
+        };
+    }
+
+    collectUsenetConfig() {
+        let providers = [];
+        for (let i = 0; i < this.usenetProviderCount; i++) {
+            const provider = {
+                host: document.querySelector(`[name="usenet.providers[${i}].host"]`).value,
+                port: parseInt(document.querySelector(`[name="usenet.providers[${i}].port"]`).value) || 119,
+                username: document.querySelector(`[name="usenet.providers[${i}].username"]`).value,
+                password: document.querySelector(`[name="usenet.providers[${i}].password"]`).value,
+                ssl: document.querySelector(`[name="usenet.providers[${i}].ssl"]`).checked,
+                max_connections: parseInt(document.querySelector(`[name="usenet.providers[${i}].max_connections"]`).value) || 100,
+                priority: parseInt(document.querySelector(`[name="usenet.providers[${i}].priority"]`).value) || 0
+            };
+            if (provider.host && provider.username && provider.password) {
+                providers.push(provider);
+            }
+        }
+        return {
+            providers: providers,
+            max_connections: parseInt(document.querySelector('[name="usenet.max_connections"]')?.value) || 10,
+            read_ahead: document.querySelector('[name="usenet.read_ahead"]').value || "32MB",
+            processing_timeout: document.querySelector('[name="usenet.processing_timeout"]')?.value || "5m",
+            availability_sample_percent: parseInt(document.querySelector('[name="usenet.availability_sample_percent"]')?.value) || 10,
+            max_concurrent_nzb: parseInt(document.querySelector('[name="usenet.max_concurrent_nzb"]')?.value) || 2,
+            disk_buffer_path: document.querySelector('[name="usenet.disk_buffer_path"]')?.value || "",
+            skip_repair: document.querySelector('[name="usenet.skip_repair"]').checked
         };
     }
 
@@ -1078,6 +1185,7 @@ class ConfigManager {
                 download_uncached: document.querySelector(`[name="debrid[${i}].download_uncached"]`).checked,
                 unpack_rar: document.querySelector(`[name="debrid[${i}].unpack_rar"]`).checked,
                 add_samples: document.querySelector(`[name="debrid[${i}].add_samples"]`).checked,
+                user_agent: document.querySelector(`[name="debrid[${i}].user_agent"]`).value
             };
 
             // Handle download API keys
@@ -1130,7 +1238,6 @@ class ConfigManager {
         return {
             enabled: document.querySelector('[name="repair.enabled"]').checked,
             interval: document.querySelector('[name="repair.interval"]').value,
-            repair_mode: document.querySelector('[name="repair.repair_mode"]').value,
             strategy: document.querySelector('[name="repair.strategy"]').value,
             workers: parseInt(document.querySelector('[name="repair.workers"]').value) || 1,
             auto_process: document.querySelector('[name="repair.auto_process"]').checked
@@ -1183,7 +1290,7 @@ class ConfigManager {
             vfs_cache_max_age: getElementValue('vfs_cache_max_age', '1h'),
             vfs_cache_max_size: getElementValue('vfs_cache_max_size'),
             vfs_cache_poll_interval: getElementValue('vfs_cache_poll_interval', '1m'),
-            vfs_read_chunk_size: getElementValue('vfs_read_chunk_size', '128M'),
+            vfs_read_chunk_size: getElementValue('vfs_read_chunk_size', ''),
             vfs_read_chunk_size_limit: getElementValue('vfs_read_chunk_size_limit', 'off'),
             vfs_cache_min_free_space: getElementValue('vfs_cache_min_free_space', ''),
             vfs_fast_fingerprint: getElementValue('vfs_fast_fingerprint', false),
@@ -1193,7 +1300,7 @@ class ConfigManager {
             uid: getElementValue('uid', 0),
             gid: getElementValue('gid', 0),
             umask: getElementValue('umask', ''),
-            vfs_read_ahead: getElementValue('vfs_read_ahead', '128k'),
+            vfs_read_ahead: getElementValue('vfs_read_ahead', ''),
             attr_timeout: getElementValue('attr_timeout', '1s'),
             dir_cache_time: getElementValue('dir_cache_time', '5m'),
             no_modtime: getElementValue('no_modtime', false),
@@ -1224,16 +1331,12 @@ class ConfigManager {
             cache_cleanup_interval: getElementValue('cache_cleanup_interval'),
             chunk_size: getElementValue('chunk_size'),
             read_ahead_size: getElementValue('read_ahead_size'),
-            max_concurrent_reads: getElementValue('max_concurrent_reads', 0),
             daemon_timeout: getElementValue('daemon_timeout'),
             uid: getElementValue('uid', 0),
             gid: getElementValue('gid', 0),
             umask: getElementValue('umask'),
             allow_other: getElementValue('allow_other', false),
             default_permissions: getElementValue('default_permissions', false),
-            attr_timeout: getElementValue('attr_timeout'),
-            entry_timeout: getElementValue('entry_timeout'),
-            negative_timeout: getElementValue('negative_timeout')
         };
     }
 
@@ -1445,6 +1548,155 @@ class ConfigManager {
         });
 
         return customFolders;
+    }
+
+    // Usenet Configuration Methods
+    populateUsenetSettings(usenet) {
+        // Populate providers
+        if (usenet.providers && Array.isArray(usenet.providers)) {
+            usenet.providers.forEach(provider => this.addUsenetProvider(provider));
+        }
+
+        // Populate stream settings
+        const streamFields = {
+            'max_connections': usenet.max_connections,
+            'read_ahead': usenet.read_ahead,
+            'processing_timeout': usenet.processing_timeout,
+            'availability_sample_percent': usenet.availability_sample_percent,
+            'max_concurrent_nzb': usenet.max_concurrent_nzb,
+            'disk_buffer_path': usenet.disk_buffer_path,
+            'skip_repair': usenet.skip_repair
+        };
+
+        Object.entries(streamFields).forEach(([id, value]) => {
+            const input = document.getElementsByName(`usenet.${id}`)[0];
+            if (input && value !== undefined) {
+                input.value = value;
+            }
+        });
+    }
+
+    addUsenetProvider(data = {}) {
+        const providerHtml = this.getUsenetProviderTemplate(this.usenetProviderCount, data);
+        this.refs.usenetProviders.insertAdjacentHTML('beforeend', providerHtml);
+
+        // Populate data if provided
+        if (Object.keys(data).length > 0) {
+            this.populateUsenetProviderData(this.usenetProviderCount, data);
+        }
+
+        this.usenetProviderCount++;
+    }
+
+    populateUsenetProviderData(index, data) {
+        Object.entries(data).forEach(([key, value]) => {
+            const input = document.querySelector(`[name="usenet.providers[${index}].${key}"]`);
+            if (input) {
+                if (input.type === 'checkbox') {
+                    input.checked = value;
+                } else {
+                    input.value = value;
+                }
+            }
+        });
+    }
+
+    getUsenetProviderTemplate(index, data = {}) {
+        return `
+        <div class="card bg-base-200 border border-base-300 usenet-provider" data-index="${index}">
+            <div class="card-body">
+                <div class="flex justify-between items-start mb-4">
+                    <h4 class="font-bold text-lg">
+                        <i class="bi bi-server mr-2"></i>
+                        Provider #${index + 1}
+                    </h4>
+                    <button type="button" class="btn btn-error btn-sm" onclick="this.closest('.usenet-provider').remove();">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div>
+                        <label class="label" for="usenet_provider_${index}_host">
+                            <span class="font-medium">Server Host</span>
+                        </label>
+                        <input type="text" class="input w-full"
+                               name="usenet.providers[${index}].host"
+                               id="usenet_provider_${index}_host"
+                               placeholder="news.usenetexpress.com"
+                               required>
+                        <span class="text-sm opacity-70">NNTP server hostname</span>
+                    </div>
+                    <div>
+                        <label class="label" for="usenet_provider_${index}_username">
+                            <span class="font-medium">Username</span>
+                        </label>
+                        <input type="text" class="input w-full"
+                               name="usenet.providers[${index}].username"
+                               id="usenet_provider_${index}_username"
+                               autocomplete="off">
+                        <span class="text-sm opacity-70">NNTP username</span>
+                    </div>
+                    <div>
+                        <label class="label" for="usenet_provider_${index}_password">
+                            <span class="font-medium">Password</span>
+                        </label>
+                        <div class="password-toggle-container">
+                            <input type="password" class="input input-has-toggle"
+                                   name="usenet.providers[${index}].password"
+                                   id="usenet_provider_${index}_password"
+                                   autocomplete="new-password">
+                            <button type="button" class="password-toggle-btn">
+                                <i class="bi bi-eye" id="usenet_provider_${index}_password_icon"></i>
+                            </button>
+                        </div>
+                        <span class="text-sm opacity-70">NNTP password</span>
+                    </div>
+
+                    <div>
+                        <label class="label" for="usenet_provider_${index}_port">
+                            <span class="font-medium">Port</span>
+                        </label>
+                        <input type="number" class="input w-full"
+                               name="usenet.providers[${index}].port"
+                               id="usenet_provider_${index}_port"
+                               placeholder="119"
+                               min="1" max="65535"
+                               value="119">
+                        <span class="text-sm opacity-70">NNTP port (563 for SSL, 119 for plain)</span>
+                    </div>
+
+                    <div>
+                        <label class="label" for="usenet_provider_${index}_max_connections">
+                            <span class="font-medium">Max Connections</span>
+                        </label>
+                        <input type="number" class="input w-full"
+                               name="usenet.providers[${index}].max_connections"
+                               id="usenet_provider_${index}_max_connections">
+                        <span class="text-sm opacity-70">Max connections for this provider</span>
+                    </div>
+                    <div>
+                        <label class="label" for="usenet_provider_${index}_priority">
+                            <span class="font-medium">Priority</span>
+                        </label>
+                        <input type="number" class="input w-full"
+                               name="usenet.providers[${index}].priority"
+                               id="usenet_provider_${index}_priority">
+                        <span class="text-sm opacity-70">Priority for this provider (lower number = higher priority)</span>
+                    </div>
+                </div>
+
+                <div class="flex gap-4 mt-4">
+                    <label class="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
+                               name="usenet.providers[${index}].ssl"
+                               id="usenet_provider_${index}_ssl">
+                        <span class="text-sm">Use SSL</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+        `;
     }
 }
 

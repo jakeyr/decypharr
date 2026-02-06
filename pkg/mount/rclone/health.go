@@ -11,22 +11,20 @@ func (m *Mount) RecoverMount() error {
 	mountInfo := m.getMountInfo()
 
 	if mountInfo == nil {
-		return fmt.Errorf("mount for provider %s does not exist", m.Provider)
+		return fmt.Errorf("no mount info available for recovery")
 	}
 
 	m.logger.Warn().Msg("Attempting to recover mount")
 
 	// First try to unmount cleanly
-	if err := m.unmount(); err != nil {
-		m.logger.Error().Err(err).Msg("Failed to unmount during recovery")
-	}
+	m.unmount()
 
 	// Wait a moment
 	time.Sleep(1 * time.Second)
 
 	// Try to remount
 	if err := m.Start(context.Background()); err != nil {
-		return fmt.Errorf("failed to recover mount for %s: %w", m.Provider, err)
+		return fmt.Errorf("failed to recover mount : %w", err)
 	}
 
 	m.logger.Info().Msg("Successfully recovered mount")
@@ -51,7 +49,7 @@ func (m *Mount) MonitorMounts(ctx context.Context) {
 
 // performMountHealthCheck checks and attempts to recover unhealthy mounts
 func (m *Mount) performMountHealthCheck() {
-	if err := m.client.CheckMountHealth(fmt.Sprintf("%s:", m.Provider)); err != nil {
+	if err := m.client.CheckMountHealth(context.Background(), FSName); err != nil {
 		m.logger.Warn().Err(err).Msg("Mount health check failed, attempting recovery")
 
 		// Mark mount as unhealthy

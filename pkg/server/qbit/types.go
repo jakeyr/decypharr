@@ -399,7 +399,7 @@ type TorrentFile struct {
 }
 
 // ToQBitTorrent converts to QBitTorrent format for API compatibility
-func convertToQBitTorrentTorrent(t *storage.Torrent) Torrent {
+func convertToQBitTorrentTorrent(t *storage.Entry) Torrent {
 	qbitTorrent := Torrent{
 		Hash:         t.InfoHash,
 		Name:         t.Name,
@@ -414,7 +414,7 @@ func convertToQBitTorrentTorrent(t *storage.Torrent) Torrent {
 		ContentPath:  t.ContentPath,
 		AddedOn:      t.CreatedAt.Unix(),
 		CompletionOn: 0,
-		Debrid:       t.ActiveDebrid,
+		Debrid:       t.ActiveProvider,
 		DebridID:     "",
 		AmountLeft:   int64(float64(t.Size) * (1 - t.Progress)),
 		Downloaded:   int64(float64(t.Size) * t.Progress),
@@ -432,7 +432,7 @@ func convertToQBitTorrentTorrent(t *storage.Torrent) Torrent {
 	return qbitTorrent
 }
 
-func getTorrentFiles(t *storage.Torrent) []TorrentFile {
+func getTorrentFiles(t *storage.Entry) []TorrentFile {
 	index := 0
 	files := make([]TorrentFile, 0)
 	for _, f := range t.Files {

@@ -2,7 +2,17 @@ package manager
 
 import (
 	"context"
+	"os/exec"
 	"strings"
+	"time"
+
+	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/sourcegraph/conc/pool"
+)
+
+const (
+	MaxFFprobeWorkers = 10
+	FFprobeTimeout    = 60 * time.Second
 )
 
 type MountManager interface {
@@ -11,7 +21,6 @@ type MountManager interface {
 	Stats() map[string]interface{}
 	IsReady() bool
 	Type() string
-	PreCache(filePaths []string) error
 	Refresh(dirs []string) error
 }
 
@@ -36,25 +45,58 @@ func (m *Manager) RefreshMount() error {
 	}
 
 	// Call event handler if set
-	if m.mountManager != nil && m.mountManager.Refresh != nil {
+	if m.mountManager != nil {
 		return m.mountManager.Refresh(dirs)
 	}
 	return nil
 }
 
-// PreCache calls the mount's PreCache method via event handler
-func (m *Manager) PreCache(filePaths []string) error {
-	if m.mountManager != nil && m.mountManager.PreCache != nil {
-		return m.mountManager.PreCache(filePaths)
+// RunFFprobe runs ffprobe on the given file paths to warm up caches and trigger imports.
+// Uses: ffprobe -v quiet -print_format json -show_format -show_streams <file>
+func (m *Manager) RunFFprobe(filePaths []string) error {
+	if len(filePaths) == 0 {
+		return nil
 	}
+
+	// Check if ffprobe is available
+	_, err := exec.LookPath("ffprobe")
+	if err != nil {
+		return err
+	}
+
+	// Use a worker pool to limit concurrency
+
+	p := pool.New().WithMaxGoroutines(MaxFFprobeWorkers)
+
+	for _, fp := range filePaths {
+		if !utils.IsMediaFile(fp) {
+			continue
+		}
+		p.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), FFprobeTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "ffprobe",
+				"-v", "quiet",
+				"-print_format", "json",
+				"-show_format",
+				"-show_streams",
+				fp,
+			)
+			if err := cmd.Run(); err != nil {
+				// Log error but continue
+				m.logger.Warn().
+					Err(err).
+					Str("file", fp).
+					Msg("ffprobe failed")
+			}
+		})
+	}
+
+	p.Wait()
 	return nil
 }
 
 type stubMountManager struct{}
-
-func (s *stubMountManager) PreCache(filePaths []string) error {
-	return nil
-}
 
 func (s *stubMountManager) Refresh(dirs []string) error {
 	return nil

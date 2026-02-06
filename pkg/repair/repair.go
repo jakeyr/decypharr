@@ -1,13 +1,10 @@
 package repair
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,11 +15,11 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
-	"github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/manager"
+	"github.com/sirrobot01/decypharr/pkg/notifications"
 	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/sourcegraph/conc/pool"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -33,7 +30,6 @@ type contexts struct {
 
 type Repair struct {
 	manager     *manager.Manager
-	interval    string
 	autoProcess bool
 	logger      zerolog.Logger
 	workers     int
@@ -54,7 +50,6 @@ func New(mgr *manager.Manager) *Repair {
 
 	r := &Repair{
 		logger:         logger.New("repair"),
-		interval:       cfg.Repair.Interval,
 		autoProcess:    cfg.Repair.AutoProcess,
 		manager:        mgr,
 		workers:        workers,
@@ -65,43 +60,17 @@ func New(mgr *manager.Manager) *Repair {
 	return r
 }
 
-func (r *Repair) Reset() {
-	// Stop scheduler
-	if r.scheduler != nil {
-		if err := r.scheduler.Shutdown(); err != nil {
-			r.logger.Error().Err(err).Msg("Error shutting down scheduler")
-		}
+func (r *Repair) Run(ctx context.Context) {
+	if err := r.addJobWithContext(ctx, []string{}, []string{}, r.autoProcess, true); err != nil {
+		r.logger.Error().Err(err).Msg("Error running repair job")
 	}
-
 }
 
-func (r *Repair) Start(ctx context.Context) error {
-
-	r.scheduler, _ = gocron.NewScheduler(gocron.WithLocation(time.Local))
-
-	if jd, err := utils.ConvertToJobDef(r.interval); err != nil {
-		r.logger.Error().Err(err).Str("interval", r.interval).Msg("Error converting interval")
-	} else {
-		_, err2 := r.scheduler.NewJob(jd, gocron.NewTask(func() {
-			r.logger.Info().Msgf("Repair job started at %s", time.Now().Format("15:04:05"))
-			if err := r.AddJob([]string{}, []string{}, r.autoProcess, true); err != nil {
-				r.logger.Error().Err(err).Msg("Error running repair job")
-			}
-		}))
-		if err2 != nil {
-			r.logger.Error().Err(err2).Msg("Error creating repair job")
-		} else {
-			r.scheduler.Start()
-			r.logger.Info().Msgf("Repair job scheduled every %s", r.interval)
-		}
-	}
-
-	<-ctx.Done()
-
-	r.logger.Info().Msg("Stopping repair scheduler")
-	r.Reset()
-
-	return nil
+func (r *Repair) Stop() {
+	r.activeContexts.Range(func(key string, value contexts) bool {
+		value.cancel()
+		return true
+	})
 }
 
 func (r *Repair) getArrs(arrNames []string) []string {
@@ -174,92 +143,6 @@ func (r *Repair) preRunChecks() error {
 	return nil
 }
 
-func (r *Repair) AddJob(arrsNames []string, mediaIDs []string, autoProcess, recurrent bool) error {
-	key := jobKey(arrsNames, mediaIDs)
-
-	// Check for existing running job
-	job := r.manager.Storage().GetRepairJobByUniqueKey(key)
-	if job != nil && job.Status == storage.JobStarted {
-		return fmt.Errorf("job already running")
-	}
-	job = r.newJob(arrsNames, mediaIDs)
-	if job == nil {
-		return fmt.Errorf("failed to create job")
-	}
-	job.AutoProcess = autoProcess
-	job.Recurrent = recurrent
-	job.ID = cmp.Or(job.ID, uuid.New().String())
-	r.reset(job)
-
-	ctx, cancelFunc := context.WithCancel(r.ctx)
-
-	r.activeContexts.Store(job.ID, contexts{
-		ctx:    ctx,
-		cancel: cancelFunc,
-	})
-
-	// Save job
-	if err := r.manager.Storage().SaveRepairJob(key, job); err != nil {
-		return err
-	}
-
-	go func() {
-		if err := r.repair(ctx, job); err != nil {
-			r.logger.Error().Err(err).Msg("Error running repair")
-			if !errors.Is(ctx.Err(), context.Canceled) {
-				job.FailedAt = time.Now()
-				job.Error = err.Error()
-				job.Status = storage.JobFailed
-				job.CompletedAt = time.Now()
-			} else {
-				job.FailedAt = time.Now()
-				job.Error = err.Error()
-				job.Status = storage.JobFailed
-				job.CompletedAt = time.Now()
-			}
-		}
-		r.onComplete() // Clear caches and maps after job completion
-	}()
-	return nil
-}
-
-func (r *Repair) StopJob(id string) error {
-	job := r.GetJob(id)
-	if job == nil {
-		return fmt.Errorf("job %s not found", id)
-	}
-
-	// Check if job can be stopped
-	if job.Status != storage.JobStarted && job.Status != storage.JobProcessing {
-		return fmt.Errorf("job %s cannot be stopped (status: %s)", id, job.Status)
-	}
-	ctx, ok := r.activeContexts.Load(id)
-	if !ok {
-		return fmt.Errorf("job %s context not found", id)
-	}
-
-	// Cancel the job
-	if ctx.cancel != nil {
-		ctx.cancel()
-		r.logger.Info().Msgf("Job %s cancellation requested", id)
-		go func() {
-			if job.Status == storage.JobStarted || job.Status == storage.JobProcessing {
-				job.Status = storage.JobCancelled
-				job.BrokenItems = nil
-				// Clear active context
-				r.activeContexts.Delete(id)
-				job.CompletedAt = time.Now()
-				job.Error = "Job was cancelled by user"
-				r.saveToStorage(job)
-			}
-		}()
-
-		return nil
-	}
-
-	return fmt.Errorf("job %s cannot be cancelled", id)
-}
-
 func (r *Repair) saveToStorage(job *storage.Job) {
 	if job == nil {
 		return
@@ -278,20 +161,11 @@ func (r *Repair) repair(ctx context.Context, job *storage.Job) error {
 	// Initialize the run
 	r.initRun(ctx)
 
-	cfg := config.Get()
-	repairMode := cfg.Repair.Mode
-
 	// Determine which repair mode to use
 	var err error
 	var brokenItems map[string][]arr.ContentFile
 
-	if repairMode == config.RepairModeAll {
-		// Repair all torrents
-		brokenItems, err = r.repairAll(ctx, job)
-	} else {
-		// Default arr mode - repair based on Arr services
-		brokenItems, err = r.repairArrMode(ctx, job)
-	}
+	brokenItems, err = r.repairArrMode(ctx, job)
 
 	if err != nil {
 		// Check if job was canceled
@@ -306,11 +180,12 @@ func (r *Repair) repair(ctx context.Context, job *storage.Job) error {
 		job.Error = err.Error()
 		job.Status = storage.JobFailed
 		job.CompletedAt = time.Now()
-		go func() {
-			if err := r.manager.SendDiscordMessage("repair_failed", "error", job.DiscordContext()); err != nil {
-				r.logger.Error().Msgf("Error sending discord message: %v", err)
-			}
-		}()
+		r.manager.Notifications.Notify(notifications.Event{
+			Type:    config.EventRepairFailed,
+			Status:  "error",
+			Message: job.DiscordContext(),
+			Error:   err,
+		})
 		return err
 	}
 
@@ -318,11 +193,11 @@ func (r *Repair) repair(ctx context.Context, job *storage.Job) error {
 		job.CompletedAt = time.Now()
 		job.Status = storage.JobCompleted
 
-		go func() {
-			if err := r.manager.SendDiscordMessage("repair_complete", "success", job.DiscordContext()); err != nil {
-				r.logger.Error().Msgf("Error sending discord message: %v", err)
-			}
-		}()
+		r.manager.Notifications.Notify(notifications.Event{
+			Type:    config.EventRepairComplete,
+			Status:  "success",
+			Message: job.DiscordContext(),
+		})
 
 		return nil
 	}
@@ -332,18 +207,18 @@ func (r *Repair) repair(ctx context.Context, job *storage.Job) error {
 		// Job is already processed
 		job.CompletedAt = time.Now() // Mark as completed
 		job.Status = storage.JobCompleted
-		go func() {
-			if err := r.manager.SendDiscordMessage("repair_complete", "success", job.DiscordContext()); err != nil {
-				r.logger.Error().Msgf("Error sending discord message: %v", err)
-			}
-		}()
+		r.manager.Notifications.Notify(notifications.Event{
+			Type:    config.EventRepairComplete,
+			Status:  "success",
+			Message: job.DiscordContext(),
+		})
 	} else {
 		job.Status = storage.JobPending
-		go func() {
-			if err := r.manager.SendDiscordMessage("repair_pending", "pending", job.DiscordContext()); err != nil {
-				r.logger.Error().Msgf("Error sending discord message: %v", err)
-			}
-		}()
+		r.manager.Notifications.Notify(notifications.Event{
+			Type:    config.EventRepairPending,
+			Status:  "pending",
+			Message: job.DiscordContext(),
+		})
 	}
 	return nil
 }
@@ -356,7 +231,6 @@ func (r *Repair) repairArrMode(ctx context.Context, job *storage.Job) (map[strin
 	g, ctx := errgroup.WithContext(ctx)
 
 	for _, a := range job.Arrs {
-		a := a // Capture range variable
 		g.Go(func() error {
 			select {
 			case <-ctx.Done():
@@ -402,108 +276,17 @@ func (r *Repair) repairArrMode(ctx context.Context, job *storage.Job) (map[strin
 	return brokenItems, nil
 }
 
-// repairAll repairs all torrents in the system by checking them via ForEachBatch
-func (r *Repair) repairAll(ctx context.Context, job *storage.Job) (map[string][]arr.ContentFile, error) {
-	r.logger.Info().Msg("Starting repair all torrents mode")
-
-	// Use a sync map to safely track broken torrents
-	brokenTorrents := &sync.Map{}
-	batchSize := 100
-
-	// Process torrents in batches
-	err := r.manager.Storage().ForEachBatch(batchSize, func(batch []*storage.Torrent) error {
-		// Use error group to process batch concurrently
-		g, batchCtx := errgroup.WithContext(ctx)
-		g.SetLimit(r.workers)
-
-		for _, torrent := range batch {
-			torrent := torrent // Capture range variable
-
-			g.Go(func() error {
-				select {
-				case <-batchCtx.Done():
-					return batchCtx.Err()
-				default:
-				}
-
-				// Get the torrent entry
-				entry, err := r.manager.GetEntry(torrent.Name)
-				if err != nil {
-					r.logger.Debug().Err(err).Str("torrent", torrent.Name).Msg("Failed to get torrent entry, skipping")
-					return nil // Skip this torrent, don't fail the whole batch
-				}
-
-				// Check if torrent has broken files
-				brokenFilePaths := r.manager.GetBrokenFiles(entry, []string{})
-				if len(brokenFilePaths) > 0 {
-					r.logger.Info().
-						Str("torrent", torrent.Name).
-						Int("broken_files", len(brokenFilePaths)).
-						Msg("Found broken files in torrent")
-
-					// Store broken torrent info
-					// We'll use torrent name as key since we don't have Arr context in "all" mode
-					brokenTorrents.Store(torrent.InfoHash, &torrentRepairInfo{
-						Torrent:         torrent,
-						BrokenFilePaths: brokenFilePaths,
-					})
-
-					// If auto-process is enabled, try to fix immediately
-					if job.AutoProcess {
-						if err := r.manager.FixTorrent(batchCtx, torrent); err != nil {
-							r.logger.Error().Err(err).Str("torrent", torrent.Name).Msg("Failed to fix torrent")
-						} else {
-							r.logger.Info().Str("torrent", torrent.Name).Msg("Successfully fixed torrent")
-						}
-					}
-				}
-
-				return nil
-			})
-		}
-
-		return g.Wait()
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("error processing torrent batches: %w", err)
-	}
-
-	// Convert broken torrents to the expected format
-	// Since we don't have Arr context in "all" mode, we'll use a generic key
-	brokenItems := map[string][]arr.ContentFile{}
-	allBrokenFiles := make([]arr.ContentFile, 0)
-
-	brokenTorrents.Range(func(key, value interface{}) bool {
-		info := value.(*torrentRepairInfo)
-		for _, filepath := range info.BrokenFilePaths {
-			allBrokenFiles = append(allBrokenFiles, arr.ContentFile{
-				Path:       filepath,
-				TargetPath: filepath,
-			})
-		}
-		return true
-	})
-
-	if len(allBrokenFiles) > 0 {
-		brokenItems["all-torrents"] = allBrokenFiles
-	}
-
-	r.logger.Info().Int("broken_files", len(allBrokenFiles)).Msg("Repair all torrents completed")
-	return brokenItems, nil
-}
-
-// torrentRepairInfo holds information about a broken torrent
-type torrentRepairInfo struct {
-	Torrent         *storage.Torrent
-	BrokenFilePaths []string
-}
-
 func (r *Repair) repairArr(ctx context.Context, job *storage.Job, _arr string, tmdbId string) ([]arr.ContentFile, error) {
 	brokenItems := make([]arr.ContentFile, 0)
 	a := r.manager.Arr().Get(_arr)
-
-	r.logger.Info().Msgf("Starting repair for %s", a.Name)
+	if a == nil {
+		return brokenItems, fmt.Errorf("arr %s not found", _arr)
+	}
+	if tmdbId == "" {
+		r.logger.Info().Msgf("Starting repair for all %s media", a.Name)
+	} else {
+		r.logger.Info().Msgf("Starting repair for %s media with TMDB ID %s", a.Name, tmdbId)
+	}
 	media, err := a.GetMedia(tmdbId)
 	if err != nil {
 		r.logger.Info().Msgf("Failed to get %s media: %v", a.Name, err)
@@ -514,11 +297,6 @@ func (r *Repair) repairArr(ctx context.Context, job *storage.Job, _arr string, t
 	if len(media) == 0 {
 		r.logger.Info().Msgf("No %s media found", a.Name)
 		return brokenItems, nil
-	}
-	// Check first media to confirm mounts are accessible
-	if err := r.checkMountUp(media); err != nil {
-		r.logger.Error().Err(err).Msgf("Mount check failed for %s", a.Name)
-		return brokenItems, fmt.Errorf("mount check failed: %w", err)
 	}
 
 	// Mutex for brokenItems
@@ -574,44 +352,12 @@ func (r *Repair) repairArr(ctx context.Context, job *storage.Job, _arr string, t
 
 	wg.Wait()
 	if len(brokenItems) == 0 {
-		r.logger.Info().Msgf("No broken items found for %s", a.Name)
+		r.logger.Info().Msgf("No broken items found for %s[%s]", a.Name, strings.Join(job.MediaIDs, ","))
 		return brokenItems, nil
 	}
 
-	r.logger.Info().Msgf("Repair completed for %s. %d broken items found", a.Name, len(brokenItems))
+	r.logger.Info().Msgf("Repair completed for %s[%s]. %d broken items found", a.Name, strings.Join(job.MediaIDs, ","), len(brokenItems))
 	return brokenItems, nil
-}
-
-// checkMountUp checks if the mounts are accessible
-func (r *Repair) checkMountUp(media []arr.Content) error {
-	firstMedia := media[0]
-	for _, m := range media {
-		if len(m.Files) > 0 {
-			firstMedia = m
-			break
-		}
-	}
-	files := firstMedia.Files
-	if len(files) == 0 {
-		return fmt.Errorf("no files found in media %s", firstMedia.Title)
-	}
-	for _, file := range files {
-		if _, err := os.Stat(file.Path); os.IsNotExist(err) {
-			// If the file does not exist, we can't check the symlink target
-			r.logger.Debug().Msgf("File %s does not exist, skipping repair", file.Path)
-			return fmt.Errorf("file %s does not exist, skipping repair", file.Path)
-		}
-		// GetReader the symlink target
-		symlinkPath := getSymlinkTarget(file.Path)
-		if symlinkPath != "" {
-			r.logger.Trace().Msgf("Found symlink target for %s: %s", file.Path, symlinkPath)
-			if _, err := os.Stat(symlinkPath); os.IsNotExist(err) {
-				r.logger.Debug().Msgf("Symlink target %s does not exist, skipping repair", symlinkPath)
-				return fmt.Errorf("symlink target %s does not exist for %s. skipping repair", symlinkPath, file.Path)
-			}
-		}
-	}
-	return nil
 }
 
 func (r *Repair) getBrokenFiles(ctx context.Context, media arr.Content) []arr.ContentFile {
@@ -620,160 +366,30 @@ func (r *Repair) getBrokenFiles(ctx context.Context, media arr.Content) []arr.Co
 		return nil
 	}
 
-	// GetReader debrid clients from somewhere - this might need to be passed in or obtained from a global registry
-	// For now, we'll use an empty map and the function will skip files it can't find
-	clients := make(map[string]common.Client)
-
 	brokenFiles := make([]arr.ContentFile, 0)
+	mu := sync.Mutex{}
 	uniqueParents := collectFiles(media)
+	p := pool.New().
+		WithContext(ctx).
+		WithMaxGoroutines(r.workers)
 	for torrentPath, files := range uniqueParents {
-		select {
-		case <-ctx.Done():
-			return brokenFiles
-		default:
-		}
-		brokenFilesForTorrent := r.checkTorrentFiles(torrentPath, files, clients, r.manager)
-		if len(brokenFilesForTorrent) > 0 {
-			brokenFiles = append(brokenFiles, brokenFilesForTorrent...)
-		}
+		p.Go(func(ctx context.Context) error {
+			entryBrokenFiles := r.checkFiles(torrentPath, files)
+			if len(entryBrokenFiles) > 0 {
+				mu.Lock()
+				brokenFiles = append(brokenFiles, entryBrokenFiles...)
+				mu.Unlock()
+			}
+			return nil
+		})
+	}
+	if err := p.Wait(); err != nil {
+		r.logger.Error().Err(err).Msgf("Error checking files for %s", media.Title)
+		return nil
 	}
 	if len(brokenFiles) == 0 {
 		return nil
 	}
 	r.logger.Debug().Msgf("%d broken files found for %s", len(brokenFiles), media.Title)
 	return brokenFiles
-}
-
-func (r *Repair) GetJob(id string) *storage.Job {
-	job, err := r.manager.Storage().GetRepairJob(id)
-	if err != nil {
-		r.logger.Error().Err(err).Msgf("Failed to get job %s", id)
-		return nil
-	}
-	return job
-}
-
-func (r *Repair) GetJobs() []*storage.Job {
-	jobs, err := r.manager.Storage().LoadAllRepairJobs()
-	if err != nil {
-		r.logger.Error().Err(err).Msg("Failed to load repair jobs")
-		return []*storage.Job{}
-	}
-	sort.Slice(jobs, func(i, j int) bool {
-		return jobs[i].StartedAt.After(jobs[j].StartedAt)
-	})
-
-	return jobs
-}
-
-func (r *Repair) ProcessJob(id string) error {
-	job := r.GetJob(id)
-	if job == nil {
-		return fmt.Errorf("job %s not found", id)
-	}
-	if job.Status != storage.JobPending {
-		return fmt.Errorf("job %s not pending", id)
-	}
-	if job.StartedAt.IsZero() {
-		return fmt.Errorf("job %s not started", id)
-	}
-	if !job.CompletedAt.IsZero() {
-		return fmt.Errorf("job %s already completed", id)
-	}
-	if !job.FailedAt.IsZero() {
-		return fmt.Errorf("job %s already failed", id)
-	}
-
-	brokenItems := job.BrokenItems
-	if len(brokenItems) == 0 {
-		r.logger.Info().Msgf("No broken items found for job %s", id)
-		job.CompletedAt = time.Now()
-		job.Status = storage.JobCompleted
-		return nil
-	}
-
-	ctxObj, ok := r.activeContexts.Load(id)
-	if !ok {
-		c, cancel := context.WithCancel(r.ctx)
-		ctxObj = contexts{
-			ctx:    c,
-			cancel: cancel,
-		}
-		r.activeContexts.Store(id, ctxObj)
-	}
-
-	g, ctx := errgroup.WithContext(ctxObj.ctx)
-	g.SetLimit(r.workers)
-
-	for arrName, items := range brokenItems {
-		items := items
-		arrName := arrName
-		g.Go(func() error {
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
-			a := r.manager.Arr().Get(arrName)
-			if a == nil {
-				r.logger.Error().Msgf("Arr %s not found", arrName)
-				return nil
-			}
-
-			if err := a.DeleteFiles(items); err != nil {
-				r.logger.Error().Err(err).Msgf("Failed to delete broken items for %s", arrName)
-				return nil
-			}
-			// Search for missing items
-			if err := a.SearchMissing(items); err != nil {
-				r.logger.Error().Err(err).Msgf("Failed to search missing items for %s", arrName)
-				return nil
-			}
-			return nil
-		})
-	}
-
-	// Update job status to in-progress
-	job.Status = storage.JobProcessing
-	r.saveToStorage(job)
-
-	// Launch a goroutine to wait for completion and update the job
-	go func() {
-		if err := g.Wait(); err != nil {
-			job.FailedAt = time.Now()
-			job.Error = err.Error()
-			job.CompletedAt = time.Now()
-			job.Status = storage.JobFailed
-			r.logger.Error().Err(err).Msgf("Job %s failed", id)
-		} else {
-			job.CompletedAt = time.Now()
-			job.Status = storage.JobCompleted
-			r.logger.Info().Msgf("Job %s completed successfully", id)
-		}
-
-		r.saveToStorage(job)
-	}()
-
-	return nil
-}
-
-func (r *Repair) DeleteJobs(ids []string) {
-	for _, id := range ids {
-		if id == "" {
-			continue
-		}
-		err := r.manager.Storage().DeleteRepairJob(id)
-		if err != nil {
-			r.logger.Error().Err(err).Msgf("Failed to delete job %s", id)
-		}
-	}
-}
-
-// Cleanup Cleans up the repair instance
-func (r *Repair) Cleanup() {
-	r.manager = nil
-	r.ctx = nil
-	r.logger.Info().Msg("Repair stopped")
 }

@@ -16,38 +16,41 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 )
 
 type ImportType string
 
 const (
-	ImportTypeQBitTorrent ImportType = "qbit"
-	ImportTypeAPI         ImportType = "api"
-	ImportSwitcher        ImportType = "switcher"
+	ImportTypeQBit    ImportType = "qbit"
+	ImportTypeAPI     ImportType = "api"
+	ImportTypeSABnzbd ImportType = "sabnzbd"
+	ImportSwitcher    ImportType = "switcher"
 )
 
 type ImportRequest struct {
+	Name             string                `json:"name"`
+	NZBContent       []byte                `json:"-,omitempty"`
 	Id               string                `json:"id"`
 	DownloadFolder   string                `json:"downloadFolder"`
 	SelectedDebrid   string                `json:"debrid"`
 	Magnet           *utils.Magnet         `json:"magnet"`
 	Arr              *arr.Arr              `json:"arr"`
 	Action           config.DownloadAction `json:"action"`
-	DownloadUncached bool                  `json:"downloadUncached"`
+	DownloadUncached *bool                 `json:"downloadUncached"`
 	CallBackUrl      string                `json:"callBackUrl"`
 	SkipMultiSeason  bool                  `json:"skip_multi_season"`
 
 	Status      string    `json:"status"`
 	CompletedAt time.Time `json:"completedAt,omitempty"`
-	Error       error     `json:"error,omitempty"`
+	Error       string    `json:"error,omitempty"`
 
 	Type  ImportType `json:"type"`
 	Async bool       `json:"async"`
 }
 
-func NewImportRequest(debrid string, downloadFolder string, magnet *utils.Magnet, arr *arr.Arr, action config.DownloadAction, downloadUncached bool, callBackUrl string, importType ImportType, skipMultiSeason bool) *ImportRequest {
-	cfg := config.Get()
-	callBackUrl = cmp.Or(callBackUrl, cfg.CallbackURL)
+func NewTorrentRequest(debrid string, downloadFolder string, magnet *utils.Magnet, arr *arr.Arr, action config.DownloadAction, downloadUncached *bool, callBackUrl string, importType ImportType, skipMultiSeason bool) *ImportRequest {
+
 	return &ImportRequest{
 		Id:               uuid.New().String(),
 		Status:           "started",
@@ -60,6 +63,22 @@ func NewImportRequest(debrid string, downloadFolder string, magnet *utils.Magnet
 		CallBackUrl:      callBackUrl,
 		Type:             importType,
 		SkipMultiSeason:  skipMultiSeason,
+	}
+}
+
+func NewNZBRequest(name, downloadFolder string, nzbContent []byte, arr *arr.Arr, action config.DownloadAction, callBackUrl string, importType ImportType, skipMultiSeason bool) *ImportRequest {
+	return &ImportRequest{
+		Name:            name,
+		Id:              uuid.New().String(),
+		Status:          "started",
+		DownloadFolder:  downloadFolder,
+		SelectedDebrid:  "usenet", // NZB imports always use usenet
+		NZBContent:      nzbContent,
+		Arr:             arr,
+		Action:          action,
+		CallBackUrl:     callBackUrl,
+		Type:            importType,
+		SkipMultiSeason: skipMultiSeason,
 	}
 }
 
@@ -87,7 +106,7 @@ func newQueue(ctx context.Context, storage *storage.Storage, capacity int, remov
 	}
 
 	if removeStalledAfterStr != "" {
-		removeStalledAfter, err := time.ParseDuration(removeStalledAfterStr)
+		removeStalledAfter, err := utils.ParseDuration(removeStalledAfterStr)
 		if err == nil {
 			q.removeStalledAfter = removeStalledAfter
 		}
@@ -108,7 +127,7 @@ func (q *Queue) ReQueue(importReq *ImportRequest) error {
 
 	importReq.Status = "queued"
 	importReq.CompletedAt = time.Time{}
-	importReq.Error = nil
+	importReq.Error = ""
 	err := q.PushRequest(importReq)
 	if err != nil {
 		return err
@@ -116,35 +135,35 @@ func (q *Queue) ReQueue(importReq *ImportRequest) error {
 	return nil
 }
 
-func (q *Queue) Add(torrent *storage.Torrent) error {
+func (q *Queue) Add(torrent *storage.Entry) error {
 	return q.storage.AddQueue(torrent)
 }
 
-func (q *Queue) GetTorrent(infohash string) (*storage.Torrent, error) {
+func (q *Queue) GetTorrent(infohash string) (*storage.Entry, error) {
 	return q.storage.GetQueued(infohash)
 }
 
-func (q *Queue) Delete(infohash string, cleanup func(t *storage.Torrent) error) error {
+func (q *Queue) Delete(infohash string, cleanup func(t *storage.Entry) error) error {
 	return q.storage.DeleteQueued(infohash, cleanup)
 }
 
-func (q *Queue) DeleteWhere(category string, state storage.TorrentState, hashes []string, cleanup func(t *storage.Torrent) error) error {
-	return q.storage.DeleteWhereQueued(q.ListFilterFunc(category, state, hashes), cleanup)
+func (q *Queue) DeleteWhere(category string, protocol config.Protocol, state storage.TorrentState, hashes []string, cleanup func(t *storage.Entry) error) error {
+	return q.storage.DeleteWhereQueued(q.ListFilterFunc(category, protocol, state, hashes), cleanup)
 }
 
 func (q *Queue) DeleteStalled() error {
 	cutoff := time.Now().Add(-q.removeStalledAfter)
-	return q.storage.DeleteWhereQueued(func(t *storage.Torrent) bool {
+	return q.storage.DeleteWhereQueued(func(t *storage.Entry) bool {
 		return t.AddedOn.Before(cutoff) && t.Status != debridTypes.TorrentStatusDownloading && t.Seeders == 0 && t.Progress == 0
 	}, nil)
 }
 
-func (q *Queue) Update(torrent *storage.Torrent) error {
+func (q *Queue) Update(torrent *storage.Entry) error {
 	// Update the state here
 	return q.storage.UpdateQueue(torrent)
 }
 
-func (q *Queue) ListFilterFunc(category string, state storage.TorrentState, hashes []string) func(*storage.Torrent) bool {
+func (q *Queue) ListFilterFunc(category string, protocol config.Protocol, state storage.TorrentState, hashes []string) func(*storage.Entry) bool {
 	hashSet := make(map[string]struct{}, len(hashes))
 	if len(hashes) > 0 {
 		for _, h := range hashes {
@@ -152,9 +171,9 @@ func (q *Queue) ListFilterFunc(category string, state storage.TorrentState, hash
 		}
 	}
 
-	var filterFunc func(*storage.Torrent) bool
-	if category != "" || len(hashes) != 0 || state != "" {
-		filterFunc = func(t *storage.Torrent) bool {
+	var filterFunc func(*storage.Entry) bool
+	if category != "" || len(hashes) != 0 || state != "" || protocol != config.ProtocolAll {
+		filterFunc = func(t *storage.Entry) bool {
 			if category != "" && t.Category != category {
 				return false
 			}
@@ -166,18 +185,21 @@ func (q *Queue) ListFilterFunc(category string, state storage.TorrentState, hash
 					return false
 				}
 			}
+			if protocol != config.ProtocolAll && t.Protocol != protocol {
+				return false
+			}
 			return true
 		}
 	}
 	return filterFunc
 }
 
-func (q *Queue) ListFilter(category string, state storage.TorrentState, hashes []string, sortBy string, reverse bool) []*storage.Torrent {
-	filterFunc := q.ListFilterFunc(category, state, hashes)
+func (q *Queue) ListFilter(category string, protocol config.Protocol, state storage.TorrentState, hashes []string, sortBy string, reverse bool) []*storage.Entry {
+	filterFunc := q.ListFilterFunc(category, protocol, state, hashes)
 	torrents, err := q.storage.FilterQueued(filterFunc)
 	if err != nil {
 		// return empty list on error
-		return []*storage.Torrent{}
+		return []*storage.Entry{}
 	}
 
 	if sortBy != "" {
@@ -211,7 +233,7 @@ func (q *Queue) ListFilter(category string, state storage.TorrentState, hashes [
 	return torrents
 }
 
-func (q *Queue) UpdateWhere(predicate func(*storage.Torrent) bool, updateFunc func(*storage.Torrent) bool) error {
+func (q *Queue) UpdateWhere(predicate func(*storage.Entry) bool, updateFunc func(*storage.Entry) bool) error {
 	return q.storage.UpdateWhereQueued(predicate, updateFunc)
 }
 
@@ -313,4 +335,68 @@ func (q *Queue) IsEmpty() bool {
 func (q *Queue) Close() {
 	q.cancel()
 	q.cond.Broadcast()
+}
+
+
+
+// nzbJob represents a queued NZB processing job
+type nzbJob struct {
+	entry  *storage.Entry
+	meta   *storage.NZB
+	groups map[string]*parser.FileGroup
+}
+
+// nzbJobQueue is an unbounded, thread-safe job queue
+type nzbJobQueue struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	jobs   []*nzbJob
+	closed bool
+}
+
+func newNzbJobQueue() *nzbJobQueue {
+	q := &nzbJobQueue{}
+	q.cond = sync.NewCond(&q.mu)
+	return q
+}
+
+// Push adds a job to the queue (never blocks)
+func (q *nzbJobQueue) Push(job *nzbJob) {
+	q.mu.Lock()
+	q.jobs = append(q.jobs, job)
+	q.mu.Unlock()
+	q.cond.Signal() // Wake one waiting worker
+}
+
+// Pop removes and returns the next job, blocking if queue is empty
+func (q *nzbJobQueue) Pop() (*nzbJob, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for len(q.jobs) == 0 && !q.closed {
+		q.cond.Wait() // release lock and wait for signal
+	}
+
+	if q.closed && len(q.jobs) == 0 {
+		return nil, false // Queue closed and empty
+	}
+
+	job := q.jobs[0]
+	q.jobs = q.jobs[1:]
+	return job, true
+}
+
+// Len returns current queue length
+func (q *nzbJobQueue) Len() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.jobs)
+}
+
+// Close signals all waiting workers to exit
+func (q *nzbJobQueue) Close() {
+	q.mu.Lock()
+	q.closed = true
+	q.mu.Unlock()
+	q.cond.Broadcast() // Wake all waiting workers
 }

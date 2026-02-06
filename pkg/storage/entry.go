@@ -2,105 +2,400 @@ package storage
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
-	"github.com/vmihailenco/msgpack/v5"
-	bolt "go.etcd.io/bbolt"
+	"github.com/sirrobot01/decypharr/pkg/storage/hybrid"
+	"google.golang.org/protobuf/proto"
 )
 
-func (s *Storage) handleNameAdd(tx *bolt.Tx, torrent *Torrent) error {
-	nameKey := []byte(torrent.GetFolder())
-	nameIdxBkt := tx.Bucket([]byte(nameEntryBucket))
-	existingByte := nameIdxBkt.Get(nameKey)
-	var entry TorrentEntry
-	if err := msgpack.Unmarshal(existingByte, &entry); err != nil {
-		entry = TorrentEntry{
-			Files: make(map[string]*File),
+// AddOrUpdate adds or updates an entry
+func (s *Storage) AddOrUpdate(entry *Entry) error {
+	entry.UpdatedAt = time.Now()
+
+	// Handle name index
+	s.updateEntryItem(entry)
+
+	// Serialize
+	pb := EntryToProto(entry)
+	data, err := proto.Marshal(pb)
+	if err != nil {
+		return fmt.Errorf("failed to marshal entry: %w", err)
+	}
+
+	meta := &hybrid.EntryMeta{
+		Category:  entry.Category,
+		Provider:  entry.ActiveProvider,
+		Status:    string(entry.Status),
+		Name:      entry.GetFolder(), // Store computed folder name for fast listings
+		TotalSize: entry.Size,
+		Protocol:  string(entry.Protocol),
+		Bad:       entry.Bad,
+		AddedOn:   entry.AddedOn.Unix(),
+	}
+
+	return s.entries.Put(entry.InfoHash, data, meta)
+}
+
+// BatchAddOrUpdate adds or updates multiple entries
+func (s *Storage) BatchAddOrUpdate(entries []*Entry) error {
+	for _, entry := range entries {
+		if err := s.AddOrUpdate(entry); err != nil {
+			return err
 		}
 	}
-	// Update entry files listing
-	for fileName, file := range torrent.Files {
-		if existingFile, exists := entry.Files[fileName]; exists {
-			// Prefer the newest file entry from AddedOn
-			if file.AddedOn.After(existingFile.AddedOn) {
-				entry.Files[fileName] = file
-			} else {
-				// Keep existing
-				entry.Files[fileName] = existingFile
+	return nil
+}
+
+// Exists checks if an entry exists
+func (s *Storage) Exists(infohash string) (bool, error) {
+	return s.entries.Exists(infohash), nil
+}
+
+// Get retrieves an entry by InfoHash
+func (s *Storage) Get(infohash string) (*Entry, error) {
+	data, err := s.entries.Get(infohash)
+	if err != nil {
+		return nil, err
+	}
+
+	var pb EntryProto
+	if err := proto.Unmarshal(data, &pb); err != nil {
+		return nil, err
+	}
+
+	return ProtoToEntry(&pb), nil
+}
+
+// List retrieves all cached entries with optional filtering
+func (s *Storage) List(filter func(*Entry) bool) ([]*Entry, error) {
+	var entries []*Entry
+
+	err := s.entries.ForEach(func(key string, value []byte) error {
+		var pb EntryProto
+		if err := proto.Unmarshal(value, &pb); err != nil {
+			return nil
+		}
+		entry := ProtoToEntry(&pb)
+		if filter == nil || filter(entry) {
+			entries = append(entries, entry)
+		}
+		return nil
+	})
+
+	return entries, err
+}
+
+// ForEach iterates over entries
+func (s *Storage) ForEach(fn func(*Entry) error) error {
+	return s.entries.ForEach(func(key string, value []byte) error {
+		var pb EntryProto
+		if err := proto.Unmarshal(value, &pb); err != nil {
+			return nil
+		}
+		return fn(ProtoToEntry(&pb))
+	})
+}
+
+// ForEachBatch iterates over entries in batches
+func (s *Storage) ForEachBatch(batchSize int, fn func([]*Entry) error) error {
+	batch := make([]*Entry, 0, batchSize)
+
+	err := s.entries.ForEach(func(key string, value []byte) error {
+		var pb EntryProto
+		if err := proto.Unmarshal(value, &pb); err != nil {
+			return nil
+		}
+		batch = append(batch, ProtoToEntry(&pb))
+
+		if len(batch) >= batchSize {
+			if err := fn(batch); err != nil {
+				return err
+			}
+			batch = batch[:0]
+		}
+		return nil
+	})
+
+	if err == nil && len(batch) > 0 {
+		err = fn(batch)
+	}
+	return err
+}
+
+// EntryMetaInfo is a lightweight struct for folder listings (no disk reads)
+type EntryMetaInfo struct {
+	InfoHash string
+	Name     string
+	Size     int64
+	AddedOn  time.Time
+	Provider string
+	Protocol string
+	Bad      bool
+}
+
+// ForEachMeta iterates over entry metadata without reading full entries from disk.
+// This is O(n) in-memory only - no disk reads, no protobuf deserialization.
+func (s *Storage) ForEachMeta(fn func(*EntryMetaInfo) error) error {
+	return s.entries.ForEachMeta(func(key string, meta *hybrid.IndexEntry) error {
+		return fn(&EntryMetaInfo{
+			InfoHash: key,
+			Name:     meta.Name,
+			Size:     meta.TotalSize,
+			AddedOn:  time.Unix(meta.AddedOn, 0),
+			Provider: meta.Provider,
+			Protocol: meta.Protocol,
+			Bad:      meta.Bad,
+		})
+	})
+}
+
+// MigrateMetadata re-saves all entries to populate the new metadata fields
+// (Protocol, Bad, AddedOn, computed folder Name) in the index.
+// This is a one-time migration for existing data.
+// Returns the number of entries migrated and any error.
+func (s *Storage) MigrateMetadata() (int, error) {
+	// First, collect all keys that need migration
+	// We check if Protocol is empty as indicator of unmigrated data
+	var keysToMigrate []string
+	_ = s.entries.ForEachMeta(func(key string, meta *hybrid.IndexEntry) error {
+		// Skip special keys
+		if strings.HasPrefix(key, "__") {
+			return nil
+		}
+		// Check if metadata needs migration (Protocol empty = old format)
+		if meta.Protocol == "" {
+			keysToMigrate = append(keysToMigrate, key)
+		}
+		return nil
+	})
+
+	if len(keysToMigrate) == 0 {
+		return 0, nil
+	}
+
+	// Migrate each entry by reading and re-saving
+	migrated := 0
+	for _, key := range keysToMigrate {
+		entry, err := s.Get(key)
+		if err != nil {
+			continue // Skip entries that can't be read
+		}
+
+		// Re-save to update metadata
+		if err := s.AddOrUpdate(entry); err != nil {
+			continue
+		}
+		migrated++
+	}
+
+	return migrated, nil
+}
+
+// Delete removes an entry
+func (s *Storage) Delete(infohash string) error {
+	// get entry for cleanup
+	entry, err := s.Get(infohash)
+	if err == nil && entry != nil {
+		s.removeFromEntryItem(entry)
+	}
+	return s.entries.Delete(infohash)
+}
+
+// Count returns the number of entries
+func (s *Storage) Count() (int, error) {
+	return s.entries.Len(), nil
+}
+
+// updateEntryItem updates the name index
+func (s *Storage) updateEntryItem(entry *Entry) {
+	name := entry.GetFolder()
+	if name == "" {
+		return
+	}
+
+	var item *EntryItem
+	if data, err := s.entryItems.Get(name); err == nil {
+		var pb EntryItemProto
+		if proto.Unmarshal(data, &pb) == nil {
+			item = ProtoToEntryItem(&pb)
+		}
+	}
+
+	if item == nil {
+		item = &EntryItem{Name: name, Files: make(map[string]*File)}
+	}
+
+	for fileName, file := range entry.Files {
+		if existing, ok := item.Files[fileName]; ok {
+			if file.AddedOn.After(existing.AddedOn) {
+				item.Files[fileName] = file
 			}
 		} else {
-			entry.Files[fileName] = file
+			item.Files[fileName] = file
 		}
 	}
 
-	if len(entry.Files) == 0 {
-		s.logger.Info().Str("name", torrent.GetFolder()).Msg("Skipping name index update - no files found")
+	item.Size = item.GetSize()
+	pb := EntryItemToProto(item)
+	if data, err := proto.Marshal(pb); err == nil {
+		_ = s.entryItems.Put(name, data, nil)
+	}
+}
+
+// removeFromEntryItem removes an entry from the name index
+func (s *Storage) removeFromEntryItem(entry *Entry) {
+	name := entry.GetFolder()
+	if name == "" {
+		return
 	}
 
-	entry.Name = torrent.GetFolder()
-	entry.Size = entry.GetSize()
-	// Marshal and save back
-	updatedData, err := msgpack.Marshal(entry)
+	data, err := s.entryItems.Get(name)
 	if err != nil {
-		return fmt.Errorf("failed to marshal name entry: %w", err)
+		return
 	}
 
-	return nameIdxBkt.Put(nameKey, updatedData)
+	var pb EntryItemProto
+	if proto.Unmarshal(data, &pb) != nil {
+		return
+	}
+	item := ProtoToEntryItem(&pb)
+
+	for fileName := range entry.Files {
+		if f, exists := item.Files[fileName]; exists && f.InfoHash == entry.InfoHash {
+			delete(item.Files, fileName)
+		}
+	}
+
+	if len(item.Files) == 0 {
+		_ = s.entryItems.Delete(name)
+		return
+	}
+
+	item.Size = item.GetSize()
+	updatedPb := EntryItemToProto(item)
+	if updatedData, err := proto.Marshal(updatedPb); err == nil {
+		_ = s.entryItems.Put(name, updatedData, nil)
+	}
 }
 
-func (s *Storage) GetEntries() map[string]struct{} {
-	entries := make(map[string]struct{})
-	_ = s.db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(nameEntryBucket))
-		if bucket == nil {
-			return fmt.Errorf("name index bucket not found")
-		}
+// Queue operations
 
-		return bucket.ForEach(func(k, v []byte) error {
-			entries[string(k)] = struct{}{}
-			return nil
-		})
-	})
-	return entries
+// AddQueue adds an entry to the queue
+func (s *Storage) AddQueue(entry *Entry) error {
+	entry.CreatedAt = time.Now()
+	return s.UpdateQueue(entry)
 }
 
-func (s *Storage) UpdateTorrentEntry(torrent *Torrent) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
-		return s.handleNameAdd(tx, torrent)
-	})
+// UpdateQueue updates a queued entry
+func (s *Storage) UpdateQueue(entry *Entry) error {
+	entry.UpdatedAt = time.Now()
+
+	pb := EntryToProto(entry)
+	data, err := proto.Marshal(pb)
+	if err != nil {
+		return err
+	}
+
+	meta := &hybrid.EntryMeta{
+		Category:  entry.Category,
+		Provider:  entry.ActiveProvider,
+		Status:    string(entry.Status),
+		Name:      entry.GetFolder(), // Store computed folder name for fast listings
+		TotalSize: entry.Size,
+		Protocol:  string(entry.Protocol),
+		Bad:       entry.Bad,
+		AddedOn:   entry.AddedOn.Unix(),
+	}
+
+	return s.queue.Put(strings.ToLower(entry.InfoHash), data, meta)
 }
 
-func (s *Storage) GetEntry(name string) (*TorrentEntry, error) {
-	var entry TorrentEntry
+// GetQueued retrieves a queued entry
+func (s *Storage) GetQueued(infohash string) (*Entry, error) {
+	data, err := s.queue.Get(strings.ToLower(infohash))
+	if err != nil {
+		return nil, err
+	}
 
-	err := s.db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(nameEntryBucket))
-		if bucket == nil {
-			return fmt.Errorf("name index bucket not found")
-		}
-		data := bucket.Get([]byte(name))
-		if data == nil {
-			return fmt.Errorf("torrent entry not found by name: %s", name)
-		}
-		return msgpack.Unmarshal(data, &entry)
-	})
-
-	return &entry, err
+	var pb EntryProto
+	if err := proto.Unmarshal(data, &pb); err != nil {
+		return nil, err
+	}
+	return ProtoToEntry(&pb), nil
 }
 
-// ForEachEntry iterates over torrents in streaming fashion to avoid loading all into memory
-func (s *Storage) ForEachEntry(fn func(*TorrentEntry) error) error {
-	return s.db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(nameEntryBucket))
-		if bucket == nil {
-			return fmt.Errorf("name index bucket not found")
+// DeleteQueued removes a queued entry
+func (s *Storage) DeleteQueued(infohash string, cleanup func(*Entry) error) error {
+	key := strings.ToLower(infohash)
+	if cleanup != nil {
+		if entry, err := s.GetQueued(key); err == nil {
+			_ = cleanup(entry)
 		}
+	}
+	return s.queue.Delete(key)
+}
 
-		return bucket.ForEach(func(k, v []byte) error {
-			var entry TorrentEntry
-			if err := msgpack.Unmarshal(v, &entry); err != nil {
-				return fmt.Errorf("failed to unmarshal torrent entry: %w", err)
+// FilterQueued returns entries matching a filter
+func (s *Storage) FilterQueued(filter func(*Entry) bool) ([]*Entry, error) {
+	var entries []*Entry
+	_ = s.queue.ForEach(func(key string, value []byte) error {
+		var pb EntryProto
+		if proto.Unmarshal(value, &pb) == nil {
+			entry := ProtoToEntry(&pb)
+			if filter == nil || filter(entry) {
+				entries = append(entries, entry)
 			}
-			return fn(&entry)
-		})
+		}
+		return nil
 	})
+	return entries, nil
+}
+
+// DeleteWhereQueued deletes matching queued entries
+func (s *Storage) DeleteWhereQueued(predicate func(*Entry) bool, cleanup func(*Entry) error) error {
+	var keysToDelete []string
+	_ = s.queue.ForEach(func(key string, value []byte) error {
+		var pb EntryProto
+		if proto.Unmarshal(value, &pb) == nil {
+			entry := ProtoToEntry(&pb)
+			if predicate == nil || predicate(entry) {
+				if cleanup != nil {
+					_ = cleanup(entry)
+				}
+				keysToDelete = append(keysToDelete, key)
+			}
+		}
+		return nil
+	})
+
+	for _, key := range keysToDelete {
+		_ = s.queue.Delete(key)
+	}
+	return nil
+}
+
+// UpdateWhereQueued updates matching queued entries
+func (s *Storage) UpdateWhereQueued(filter func(*Entry) bool, updateFunc func(*Entry) bool) error {
+	type update struct {
+		key   string
+		entry *Entry
+	}
+	var updates []update
+
+	_ = s.queue.ForEach(func(key string, value []byte) error {
+		var pb EntryProto
+		if proto.Unmarshal(value, &pb) == nil {
+			entry := ProtoToEntry(&pb)
+			if (filter == nil || filter(entry)) && updateFunc != nil && updateFunc(entry) {
+				updates = append(updates, update{key, entry})
+			}
+		}
+		return nil
+	})
+
+	for _, u := range updates {
+		_ = s.UpdateQueue(u.entry)
+	}
+	return nil
 }

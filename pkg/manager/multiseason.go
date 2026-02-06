@@ -62,8 +62,8 @@ type SeasonInfo struct {
 }
 
 // convertToMultiSeason converts a normal torrent to a multi-season torrents
-func convertToMultiSeason(torrent *storage.Torrent, seasons []SeasonInfo) []*storage.Torrent {
-	seasonResults := make([]*storage.Torrent, 0, len(seasons))
+func convertToMultiSeason(torrent *storage.Entry, seasons []SeasonInfo) []*storage.Entry {
+	seasonResults := make([]*storage.Entry, 0, len(seasons))
 	for _, seasonInfo := range seasons {
 		// Filter files to only include this season's files
 		seasonFiles := make(map[string]*storage.File)
@@ -74,7 +74,6 @@ func convertToMultiSeason(torrent *storage.Torrent, seasons []SeasonInfo) []*sto
 				Size:      file.Size,
 				ByteRange: file.ByteRange,
 				Deleted:   file.Deleted,
-				IsRar:     file.IsRar,
 				InfoHash:  file.InfoHash,
 				AddedOn:   torrent.AddedOn,
 			}
@@ -82,7 +81,8 @@ func convertToMultiSeason(torrent *storage.Torrent, seasons []SeasonInfo) []*sto
 		}
 
 		// Create a season-specific managed torrent
-		seasonTorrent := &storage.Torrent{
+		seasonTorrent := &storage.Entry{
+			Protocol:         torrent.Protocol,
 			InfoHash:         seasonInfo.InfoHash,
 			Name:             seasonInfo.Name,
 			OriginalFilename: torrent.OriginalFilename,
@@ -92,18 +92,18 @@ func convertToMultiSeason(torrent *storage.Torrent, seasons []SeasonInfo) []*sto
 			Category:         torrent.Category,
 			SavePath:         torrent.SavePath,
 			Status:           debridTypes.TorrentStatusDownloading,
-			ActiveDebrid:     torrent.ActiveDebrid,
+			ActiveProvider:   torrent.ActiveProvider,
 			Action:           torrent.Action,
 			CreatedAt:        time.Now(),
 			UpdatedAt:        time.Now(),
 			AddedOn:          time.Now(),
-			Placements:       make(map[string]*storage.Placement),
+			Providers:        make(map[string]*storage.ProviderEntry),
 			Files:            seasonFiles,
 		}
 
 		// Copy placement
-		for debridName, placement := range torrent.Placements {
-			seasonTorrent.Placements[debridName] = placement
+		for debridName, placement := range torrent.Providers {
+			seasonTorrent.Providers[debridName] = placement
 		}
 		seasonResults = append(seasonResults, seasonTorrent)
 	}

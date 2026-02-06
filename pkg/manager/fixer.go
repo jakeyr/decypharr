@@ -19,7 +19,7 @@ type Fixer struct {
 	// Track re-insertion attempts and failures
 	failedToReinsert   *xsync.Map[string, struct{}]      // infohash:debrid -> failed completely
 	inFlightRepairs    *xsync.Map[string, *FixerRequest] // infohash -> repair request
-	debridOrder        []string                          // Order of debrids to try (from config)
+	providerOrder      []string                          // Order of providers to try (from config)
 	maxReinsertRetries int
 }
 
@@ -54,8 +54,8 @@ func NewFixer(manager *Manager) *Fixer {
 		manager:            manager,
 		failedToReinsert:   xsync.NewMap[string, struct{}](),
 		inFlightRepairs:    xsync.NewMap[string, *FixerRequest](),
-		debridOrder:        debridOrder,
-		maxReinsertRetries: 2, // Retry each debrid up to 2 times
+		providerOrder:      debridOrder,
+		maxReinsertRetries: 2, // retry each debrid up to 2 times
 	}
 }
 
@@ -65,9 +65,19 @@ func NewFixer(manager *Manager) *Fixer {
 // 2. If fails, cascade through other debrids in config order
 // 3. Skip debrids where torrent already exists (unless they're also broken)
 // 4. Mark as completely failed if all debrids fail
-func (f *Fixer) FixTorrent(ctx context.Context, torrent *storage.Torrent, skipCurrent bool) (*FixResult, error) {
+func (f *Fixer) FixTorrent(ctx context.Context, entry *storage.Entry, skipCurrent bool) (*FixResult, error) {
+	if entry == nil {
+		return nil, fmt.Errorf("entry is nil")
+	}
+	if !entry.CanBeFixed() {
+		return &FixResult{
+			Success:       false,
+			Error:         fmt.Errorf("entry %s cannot be fixed", entry.Name),
+			AttemptsCount: 0,
+		}, nil
+	}
 	// Check if repair is already in flight
-	if req, exists := f.inFlightRepairs.Load(torrent.InfoHash); exists {
+	if req, exists := f.inFlightRepairs.Load(entry.InfoHash); exists {
 
 		// Wait for existing repair to complete
 		select {
@@ -76,32 +86,32 @@ func (f *Fixer) FixTorrent(ctx context.Context, torrent *storage.Torrent, skipCu
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(5 * time.Minute):
-			return nil, fmt.Errorf("repair timeout for %s", torrent.Name)
+			return nil, fmt.Errorf("repair timeout for %s", entry.Name)
 		}
 	}
 
 	// Create new repair request
 	req := &FixerRequest{
-		InfoHash:         torrent.InfoHash,
+		InfoHash:         entry.InfoHash,
 		AttemptedDebrids: make([]string, 0),
 		StartedAt:        time.Now(),
 		LastAttempt:      time.Now(),
 		result:           make(chan *FixResult, 1),
 	}
-	f.inFlightRepairs.Store(torrent.InfoHash, req)
-	defer f.inFlightRepairs.Delete(torrent.InfoHash)
-	req.CurrentDebrid = torrent.ActiveDebrid
+	f.inFlightRepairs.Store(entry.InfoHash, req)
+	defer f.inFlightRepairs.Delete(entry.InfoHash)
+	req.CurrentDebrid = entry.ActiveProvider
 
 	// Build debrid attempt order: current debrid first, then others in config order
-	attemptOrder := f.buildAttemptOrder(torrent, skipCurrent)
+	attemptOrder := f.buildAttemptOrder(entry, skipCurrent)
 
 	var lastErr error
 	totalAttempts := 0
 
 	for _, debridName := range attemptOrder {
 
-		// Check if torrent has been marked as failed to re-insert
-		if f.IsFailedToReinsert(torrent.InfoHash, debridName) {
+		// Check if entry has been marked as failed to re-insert
+		if f.IsFailedToReinsert(entry.InfoHash, debridName) {
 			continue
 		}
 
@@ -118,22 +128,22 @@ func (f *Fixer) FixTorrent(ctx context.Context, torrent *storage.Torrent, skipCu
 
 		f.manager.logger.Trace().
 			Str("debrid", debridName).
-			Str("infohash", torrent.InfoHash).
+			Str("infohash", entry.InfoHash).
 			Int("attempt", totalAttempts+1).
 			Msg("Attempting re-insertion")
 
 		// Attempt re-insertion on this debrid
-		success, err := f.MoveTorrent(torrent, debridName, true)
+		success, err := f.MoveTorrent(entry, debridName, true)
 		totalAttempts++
 
 		if success {
 			f.manager.logger.Info().
 				Str("debrid", debridName).
-				Str("infohash", torrent.InfoHash).
-				Msg("Successfully re-inserted torrent")
+				Str("infohash", entry.InfoHash).
+				Msg("Successfully re-inserted entry")
 
 			// Mark as successful
-			f.ResetFailureState(torrent.InfoHash)
+			f.ResetFailureState(entry.InfoHash)
 
 			result := &FixResult{
 				Success:       true,
@@ -147,22 +157,21 @@ func (f *Fixer) FixTorrent(ctx context.Context, torrent *storage.Torrent, skipCu
 
 		lastErr = err
 		// Add failed state for this debrid
-		f.failedToReinsert.Store(fmt.Sprintf("%s:%s", torrent.InfoHash, debridName), struct{}{})
-
+		f.failedToReinsert.Store(fmt.Sprintf("%s:%s", entry.InfoHash, debridName), struct{}{})
 	}
 
 	// All debrids failed - mark as completely failed
 	f.manager.logger.Error().
-		Str("infohash", torrent.InfoHash).
+		Str("infohash", entry.InfoHash).
 		Int("attempts", totalAttempts).
 		Msg("All re-insertion attempts failed")
 
-	f.failedToReinsert.Store(torrent.InfoHash, struct{}{})
+	f.failedToReinsert.Store(entry.InfoHash, struct{}{})
 
-	// Mark torrent as bad
-	torrent.Bad = true
-	torrent.UpdatedAt = time.Now()
-	_ = f.manager.AddOrUpdate(torrent, func(t *storage.Torrent) {
+	// Mark entry as bad
+	entry.Bad = true
+	entry.UpdatedAt = time.Now()
+	_ = f.manager.AddOrUpdate(entry, func(t *storage.Entry) {
 		f.manager.RefreshEntries(true)
 	})
 
@@ -176,27 +185,35 @@ func (f *Fixer) FixTorrent(ctx context.Context, torrent *storage.Torrent, skipCu
 }
 
 // MoveTorrent attempts to re-insert a torrent on a specific debrid
-func (f *Fixer) MoveTorrent(torrent *storage.Torrent, debridName string, reinsert bool) (bool, error) {
+func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bool) (bool, error) {
+	// Check if entry can be moved
+	if entry == nil {
+		return false, fmt.Errorf("entry is nil")
+	}
+	if !entry.CanBeMoved() {
+		return false, fmt.Errorf("entry %s cannot be moved", entry.Name)
+	}
+
 	defer func() {
 		// Save to storage
-		_ = f.manager.AddOrUpdate(torrent, nil) // No need to refresh mounts
+		_ = f.manager.AddOrUpdate(entry, nil) // No need to refresh mounts
 	}()
 
-	client := f.manager.DebridClient(debridName)
+	client := f.manager.ProviderClient(debridName)
 	if client == nil {
 		return false, fmt.Errorf("debrid client %s not found", debridName)
 	}
 
 	// Check if placement already exists on this debrid
-	placement, hasPlacement := torrent.Placements[torrent.ActiveDebrid]
+	placement, hasPlacement := entry.Providers[entry.ActiveProvider]
 	var oldID string
 	if hasPlacement && placement != nil && placement.ID != "" && !reinsert {
 		// Activate the existing placement
-		if err := torrent.ActivatePlacement(debridName); err != nil {
+		if err := entry.ActivatePlacement(debridName); err != nil {
 			return false, fmt.Errorf("failed to activate existing placement: %w", err)
 		}
-		torrent.Bad = false
-		torrent.UpdatedAt = time.Now()
+		entry.Bad = false
+		entry.UpdatedAt = time.Now()
 		return true, nil
 	}
 	if placement != nil {
@@ -204,17 +221,17 @@ func (f *Fixer) MoveTorrent(torrent *storage.Torrent, debridName string, reinser
 	}
 
 	// Construct magnet
-	magnet, err := utils.GetMagnetInfo(torrent.Magnet, f.manager.config.AlwaysRmTrackerUrls)
+	magnet, err := utils.GetMagnetInfo(entry.Magnet, f.manager.config.AlwaysRmTrackerUrls)
 	if err != nil {
-		magnet = utils.ConstructMagnet(torrent.InfoHash, torrent.Name)
+		magnet = utils.ConstructMagnet(entry.InfoHash, entry.Name)
 	}
 
 	// Submit to debrid
 	newDebridTorrent := &types.Torrent{
-		Name:             torrent.Name,
+		Name:             entry.Name,
 		Magnet:           magnet,
-		InfoHash:         torrent.InfoHash,
-		Size:             torrent.Size,
+		InfoHash:         entry.InfoHash,
+		Size:             entry.Size,
 		Files:            make(map[string]types.File),
 		DownloadUncached: false,
 	}
@@ -225,14 +242,14 @@ func (f *Fixer) MoveTorrent(torrent *storage.Torrent, debridName string, reinser
 	}
 
 	if newDebridTorrent == nil || newDebridTorrent.Id == "" {
-		return false, fmt.Errorf("failed to submit magnet: empty torrent")
+		return false, fmt.Errorf("failed to submit magnet: empty entry")
 	}
 
 	// Check status
 	newDebridTorrent.DownloadUncached = false
 	newDebridTorrent, err = client.CheckStatus(newDebridTorrent)
 	if err != nil {
-		// Delete the failed torrent
+		// Delete the failed entry
 		if newDebridTorrent != nil && newDebridTorrent.Id != "" {
 			_ = client.DeleteTorrent(newDebridTorrent.Id)
 		}
@@ -242,7 +259,7 @@ func (f *Fixer) MoveTorrent(torrent *storage.Torrent, debridName string, reinser
 	// Verify files have links
 	if len(newDebridTorrent.Files) == 0 {
 		_ = client.DeleteTorrent(newDebridTorrent.Id)
-		return false, fmt.Errorf("no files in torrent after re-insertion")
+		return false, fmt.Errorf("no files in entry after re-insertion")
 	}
 
 	for _, f := range newDebridTorrent.GetFiles() {
@@ -257,32 +274,40 @@ func (f *Fixer) MoveTorrent(torrent *storage.Torrent, debridName string, reinser
 		addedOn = time.Now()
 	}
 
-	// Update torrent with new placement
-	_ = torrent.AddPlacement(newDebridTorrent)
-	// Update global files metadata if needed
+	// Update entry with new placement
+	_ = entry.AddTorrentProvider(newDebridTorrent)
+	// Update global file metadata (revives files that previously existed)
+	if entry.Files == nil {
+		entry.Files = make(map[string]*storage.File)
+	}
 	for _, f := range newDebridTorrent.GetFiles() {
-		if _, exists := torrent.Files[f.Name]; !exists {
-			torrent.Files[f.Name] = &storage.File{
+		if existing, exists := entry.Files[f.Name]; exists {
+			existing.Size = f.Size
+			existing.ByteRange = f.ByteRange
+			existing.Deleted = false
+			existing.InfoHash = entry.InfoHash
+			existing.AddedOn = addedOn
+		} else {
+			entry.Files[f.Name] = &storage.File{
 				Name:      f.Name,
 				Size:      f.Size,
-				IsRar:     f.IsRar,
 				ByteRange: f.ByteRange,
-				Deleted:   f.Deleted,
-				InfoHash:  torrent.InfoHash,
+				Deleted:   false,
+				InfoHash:  entry.InfoHash,
 				AddedOn:   addedOn,
 			}
 		}
 	}
 
 	// Activate this debrid
-	if err := torrent.ActivatePlacement(debridName); err != nil {
+	if err := entry.ActivatePlacement(debridName); err != nil {
 		f.manager.logger.Warn().Err(err).Msg("failed to activate placement")
 	}
 
-	torrent.Bad = false
-	torrent.UpdatedAt = time.Now()
+	entry.Bad = false
+	entry.UpdatedAt = time.Now()
 
-	// Delete old torrent from debrid if different ID
+	// Delete old entry from debrid if different ID
 	if oldID != "" && oldID != newDebridTorrent.Id {
 		go func() {
 			_ = client.DeleteTorrent(oldID)
@@ -292,19 +317,15 @@ func (f *Fixer) MoveTorrent(torrent *storage.Torrent, debridName string, reinser
 	return true, nil
 }
 
-func (f *Fixer) ReInsertTorrent(torrent *storage.Torrent) (bool, error) {
-	return f.MoveTorrent(torrent, torrent.ActiveDebrid, true)
-}
-
 // buildAttemptOrder creates the order of debrids to attempt re-insertion
 // Priority: current active debrid first, then others in config order
 // If skipCurrent is true, current active debrid is skipped
-func (f *Fixer) buildAttemptOrder(torrent *storage.Torrent, skipCurrent bool) []string {
-	order := make([]string, 0, len(f.debridOrder))
+func (f *Fixer) buildAttemptOrder(torrent *storage.Entry, skipCurrent bool) []string {
+	order := make([]string, 0, len(f.providerOrder))
 
 	// AddOrUpdate other debrids in config order
-	for _, debridName := range f.debridOrder {
-		if debridName == torrent.ActiveDebrid && skipCurrent {
+	for _, debridName := range f.providerOrder {
+		if debridName == torrent.ActiveProvider && skipCurrent {
 			continue
 		}
 		order = append(order, debridName)

@@ -20,7 +20,7 @@ var (
 	ErrUnsupportedDebridProvider = errors.New("unsupported debrid provider")
 )
 
-func (m *Manager) DebridClient(name string) debrid.Client {
+func (m *Manager) ProviderClient(name string) debrid.Client {
 	client, ok := m.clients.Load(name)
 	if !ok {
 		return nil
@@ -31,9 +31,6 @@ func (m *Manager) DebridClient(name string) debrid.Client {
 func (m *Manager) initDebridClients() {
 	cfg := config.Get()
 	for _, dc := range cfg.Debrids {
-		if m.firstDebrid == "" {
-			m.firstDebrid = dc.Name
-		}
 		client, err := m.createClient(dc)
 		if err != nil {
 			m.logger.Error().Err(err).Str("debrid", dc.Name).Msg("Failed to create debrid client")
@@ -94,9 +91,9 @@ func (m *Manager) FilterDebrid(filter func(debrid.Client) bool) []debrid.Client 
 func (m *Manager) GetIngests() ([]types.IngestData, error) {
 	// Use streaming to avoid loading all torrents into memory
 	var ingests []types.IngestData
-	err := m.storage.ForEach(func(torrent *storage.Torrent) error {
+	err := m.storage.ForEach(func(torrent *storage.Entry) error {
 		ingests = append(ingests, types.IngestData{
-			Debrid: torrent.ActiveDebrid,
+			Debrid: torrent.ActiveProvider,
 			Name:   torrent.OriginalFilename,
 			Hash:   torrent.InfoHash,
 			Size:   torrent.Bytes,
@@ -112,12 +109,12 @@ func (m *Manager) GetIngests() ([]types.IngestData, error) {
 func (m *Manager) GetIngestsByDebrid(debridName string) ([]types.IngestData, error) {
 	// Use streaming to avoid loading all torrents into memory
 	var ingests []types.IngestData
-	err := m.storage.ForEach(func(torrent *storage.Torrent) error {
-		if !torrent.HasPlacement(debridName) {
+	err := m.storage.ForEach(func(torrent *storage.Entry) error {
+		if !torrent.HasProvider(debridName) {
 			return nil
 		}
 		ingests = append(ingests, types.IngestData{
-			Debrid: torrent.ActiveDebrid,
+			Debrid: torrent.ActiveProvider,
 			Name:   torrent.OriginalFilename,
 			Hash:   torrent.InfoHash,
 			Size:   torrent.Bytes,

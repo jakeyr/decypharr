@@ -20,15 +20,9 @@ class RepairManager {
 
         this.refs = {
             repairForm: document.getElementById('repairForm'),
-            arrModeRadio: document.getElementById('arrModeRadio'),
-            allModeRadio: document.getElementById('allModeRadio'),
-            arrModeFields: document.getElementById('arrModeFields'),
-            allModeFields: document.getElementById('allModeFields'),
             arrSelect: document.getElementById('arrSelect'),
             mediaIds: document.getElementById('mediaIds'),
-            torrentFilter: document.getElementById('torrentFilter'),
             autoProcess: document.getElementById('autoProcess'),
-            autoProcessDescription: document.getElementById('autoProcessDescription'),
             submitBtn: document.getElementById('submitRepair'),
 
             // Jobs table
@@ -85,10 +79,6 @@ class RepairManager {
         // Form submission
         this.refs.repairForm.addEventListener('submit', (e) => this.handleFormSubmit(e));
 
-        // Mode switching
-        this.refs.arrModeRadio.addEventListener('change', () => this.handleModeSwitch());
-        this.refs.allModeRadio.addEventListener('change', () => this.handleModeSwitch());
-
         // Jobs table events
         this.refs.refreshJobs.addEventListener('click', () => this.loadJobs());
         this.refs.deleteSelectedJobs.addEventListener('click', () => this.deleteSelectedJobs());
@@ -108,22 +98,6 @@ class RepairManager {
         // Table row events (using event delegation)
         this.refs.jobsTableBody.addEventListener('click', (e) => this.handleJobTableClick(e));
         this.refs.brokenItemsTableBody.addEventListener('click', (e) => this.handleItemTableClick(e));
-    }
-
-    handleModeSwitch() {
-        const isArrMode = this.refs.arrModeRadio.checked;
-
-        if (isArrMode) {
-            // Show Arr mode fields, hide All mode fields
-            this.refs.arrModeFields.classList.remove('hidden');
-            this.refs.allModeFields.classList.add('hidden');
-            this.refs.autoProcessDescription.textContent = 'Automatically delete broken symlinks and re-search media';
-        } else {
-            // Show All mode fields, hide Arr mode fields
-            this.refs.arrModeFields.classList.add('hidden');
-            this.refs.allModeFields.classList.remove('hidden');
-            this.refs.autoProcessDescription.textContent = 'Automatically attempt to fix broken torrents';
-        }
     }
 
     async loadArrInstances() {
@@ -152,30 +126,18 @@ class RepairManager {
     async handleFormSubmit(e) {
         e.preventDefault();
 
-        const isArrMode = this.refs.arrModeRadio.checked;
-        let requestBody = {
-            autoProcess: this.refs.autoProcess.checked
+        const arr = this.refs.arrSelect.value;
+        const mediaIdsValue = this.refs.mediaIds.value.trim();
+
+        const mediaIds = mediaIdsValue ?
+            mediaIdsValue.split(',').map(id => id.trim()).filter(Boolean) :
+            [];
+
+        const requestBody = {
+            autoProcess: this.refs.autoProcess.checked,
+            arr: arr,
+            mediaIds: mediaIds.length > 0 ? mediaIds : null
         };
-
-        if (isArrMode) {
-            // Arr mode - validate and collect arr-specific data
-            const arr = this.refs.arrSelect.value;
-            const mediaIdsValue = this.refs.mediaIds.value.trim();
-
-            const mediaIds = mediaIdsValue ?
-                mediaIdsValue.split(',').map(id => id.trim()).filter(Boolean) :
-                [];
-
-            requestBody.arr = arr;
-            requestBody.mediaIds = mediaIds.length > 0 ? mediaIds : null;
-        } else {
-            // All mode - collect torrent filter if provided
-            const torrentFilter = this.refs.torrentFilter.value.trim();
-            requestBody.mode = 'all';
-            if (torrentFilter) {
-                requestBody.torrentFilter = torrentFilter;
-            }
-        }
 
         try {
             window.decypharrUtils.setButtonLoading(this.refs.submitBtn, true);
@@ -200,7 +162,6 @@ class RepairManager {
 
             // Clear form
             this.refs.mediaIds.value = '';
-            this.refs.torrentFilter.value = '';
 
             // Refresh jobs list
             await this.loadJobs();
@@ -218,7 +179,8 @@ class RepairManager {
             const response = await window.decypharrUtils.fetcher('/api/repair/jobs');
             if (!response.ok) throw new Error('Failed to fetch jobs');
 
-            this.state.jobs = await response.json();
+            const data = await response.json();
+            this.state.jobs = Array.isArray(data) ? data : [];
             this.renderJobsTable();
 
         } catch (error) {
@@ -273,10 +235,11 @@ class RepairManager {
             Object.values(job.broken_items).reduce((sum, arr) => sum + arr.length, 0) : 0;
         const canDelete = !['started', 'processing'].includes(job.status);
 
+        const arrs = job.arrs || [];
         row.innerHTML = `
             <td>
                 <label class="cursor-pointer">
-                    <input type="checkbox" class="checkbox checkbox-sm checkbox-primary" job-checkbox" 
+                    <input type="checkbox" class="checkbox checkbox-sm checkbox-primary job-checkbox"
                            value="${job.id}" ${canDelete ? '' : 'disabled'}>
                 </label>
             </td>
@@ -287,7 +250,7 @@ class RepairManager {
             </td>
             <td>
                 <div class="flex flex-wrap gap-1">
-                    ${job.arrs.map(arr => `<div class="badge badge-secondary badge-xs">${arr}</div>`).join('')}
+                    ${arrs.map(arr => `<div class="badge badge-secondary badge-xs">${arr}</div>`).join('')}
                 </div>
             </td>
             <td>
@@ -341,6 +304,7 @@ class RepairManager {
     }
 
     getSortedJobs() {
+        if (!this.state.jobs) return [];
         const jobs = [...this.state.jobs];
 
         jobs.sort((a, b) => {
@@ -356,8 +320,8 @@ class RepairManager {
                     valueB = b.status;
                     break;
                 case 'arrs':
-                    valueA = a.arrs.join(',');
-                    valueB = b.arrs.join(',');
+                    valueA = (a.arrs || []).join(',');
+                    valueB = (b.arrs || []).join(',');
                     break;
                 default:
                     valueA = a[this.state.sortBy] || '';
@@ -432,6 +396,14 @@ class RepairManager {
     }
 
     handleJobTableClick(e) {
+        // Handle checkbox changes first (before button check)
+        const checkbox = e.target.closest('.job-checkbox');
+        if (checkbox) {
+            this.updateJobSelectionState();
+            return;
+        }
+
+        // Handle button clicks
         const target = e.target.closest('button');
         if (!target) return;
 
@@ -447,12 +419,6 @@ class RepairManager {
         } else if (target.classList.contains('delete-job')) {
             this.deleteJob(jobId);
         }
-
-        // Handle checkbox changes
-        const checkbox = e.target.closest('.job-checkbox');
-        if (checkbox) {
-            this.updateJobSelectionState();
-        }
     }
 
     async viewJobDetails(jobId) {
@@ -467,7 +433,7 @@ class RepairManager {
     populateJobModal(job) {
         // Basic job info
         this.refs.modalJobId.textContent = job.id.substring(0, 8);
-        this.refs.modalJobArrs.textContent = job.arrs.join(', ');
+        this.refs.modalJobArrs.textContent = (job.arrs || []).join(', ');
         this.refs.modalJobMediaIds.textContent = job.media_ids && job.media_ids.length > 0 ?
             job.media_ids.join(', ') : 'All media';
         this.refs.modalJobAutoProcess.textContent = job.auto_process ? 'Yes' : 'No';
@@ -815,7 +781,6 @@ class RepairManager {
     }
 
     updateJobSelectionState() {
-        const checkboxes = document.querySelectorAll('.job-checkbox');
         const checkedBoxes = document.querySelectorAll('.job-checkbox:checked');
         const enabledBoxes = document.querySelectorAll('.job-checkbox:not(:disabled)');
 
@@ -1013,7 +978,7 @@ class RepairManager {
         const term = searchTerm.toLowerCase();
         return this.state.jobs.filter(job =>
             job.id.toLowerCase().includes(term) ||
-            job.arrs.some(arr => arr.toLowerCase().includes(term)) ||
+            (job.arrs || []).some(arr => arr.toLowerCase().includes(term)) ||
             (job.media_ids && job.media_ids.some(id => id.toString().includes(term)))
         );
     }

@@ -1,7 +1,6 @@
 package rclone
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +17,12 @@ import (
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/rclone"
 	"github.com/sirrobot01/decypharr/pkg/manager"
+	"gopkg.in/natefinch/lumberjack.v2"
+)
+
+const (
+	FSName     = "decypharr:"
+	ConfigName = "decypharr"
 )
 
 // Manager handles the rclone RC server and provides mount operations
@@ -36,7 +41,6 @@ type Manager struct {
 }
 
 type MountInfo struct {
-	Provider   string `json:"provider"`
 	LocalPath  string `json:"local_path"`
 	WebDAVURL  string `json:"webdav_url"`
 	Mounted    bool   `json:"mounted"`
@@ -83,12 +87,12 @@ func NewManager(manager *manager.Manager) *Manager {
 }
 
 func (m *Manager) registerMount() {
-	mountInfo := m.manager.FirstMountInfo()
+	mountInfo := m.manager.RootInfo()
 	if mountInfo == nil {
 		m.logger.Error().Msg("No mount info available to register rclone mount")
 		return
 	}
-	mnt, err := NewMount(mountInfo.Name(), m.manager, m.client)
+	mnt, err := NewMount(m.manager, m.client)
 	if err != nil {
 		m.logger.Error().Err(err).Msgf("Failed to create rclone mount for: %s", mountInfo.Name())
 		return
@@ -103,13 +107,14 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	cfg := config.Get()
-	logFile := filepath.Join(logger.GetLogPath(), "rclone.log")
 
-	// Delete old log file if it exists
-	if _, err := os.Stat(logFile); err == nil {
-		if err := os.Remove(logFile); err != nil {
-			return fmt.Errorf("failed to remove old rclone log file: %w", err)
-		}
+	// Use lumberjack for log rotation instead of rclone's --log-file
+	rotatingLog := &lumberjack.Logger{
+		Filename:   filepath.Join(logger.GetLogPath(), "rclone.log"),
+		MaxSize:    10, // 10 MB
+		MaxAge:     15, // 15 days
+		MaxBackups: 5,  // Keep max 5 backup files
+		Compress:   true,
 	}
 
 	args := []string{
@@ -117,7 +122,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		"--rc-addr", ":" + cfg.Mount.Rclone.Port,
 		"--rc-no-auth", // We'll handle auth at the application level
 		"--config", filepath.Join(m.configDir, "rclone.conf"),
-		"--log-file", logFile,
+		// No --log-file, we capture output directly
 	}
 
 	logLevel := cfg.Mount.Rclone.LogLevel
@@ -135,13 +140,12 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	m.cmd = exec.CommandContext(ctx, "rclone", args...)
 
-	// Capture output for debugging
-	var stdout, stderr bytes.Buffer
-	m.cmd.Stdout = &stdout
-	m.cmd.Stderr = &stderr
+	// Route rclone output through lumberjack for rotation
+	m.cmd.Stdout = rotatingLog
+	m.cmd.Stderr = rotatingLog
 
 	if err := m.cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start rclone: %v stdout: %s stderr: %s", err, stdout.String(), stderr.String())
+		return fmt.Errorf("failed to start rclone: %w", err)
 	}
 	m.serverStarted.Store(true)
 
@@ -185,15 +189,6 @@ func (m *Manager) Start(ctx context.Context) error {
 			m.logger.Info().Msg("Client RC server hard-terminated")
 
 		default:
-			if code, ok := ExitCode(err); ok {
-				m.logger.Debug().Int("exit_code", code).Err(err).
-					Str("stderr", stderr.String()).
-					Str("stdout", stdout.String()).
-					Msg("Client RC server error")
-			} else {
-				m.logger.Debug().Err(err).Str("stderr", stderr.String()).
-					Str("stdout", stdout.String()).Msg("Client RC server error (no exit code)")
-			}
 		}
 	}()
 	return nil
@@ -245,7 +240,7 @@ func (m *Manager) Stop() error {
 		case <-done:
 			m.logger.Info().Msg("Client process cleanup completed")
 		case <-time.After(5 * time.Second):
-			m.logger.Error().Msg("Process cleanup timeout")
+			m.logger.Error().Msg("Parse cleanup timeout")
 		}
 	}
 
@@ -271,26 +266,10 @@ func (m *Manager) Refresh(dirs []string) error {
 		return fmt.Errorf("mount is not mounted")
 	}
 
-	if err := m.client.Refresh(dirs, fmt.Sprintf("%s:", m.mount.Provider)); err != nil {
+	if err := m.client.Refresh(context.Background(), dirs, FSName); err != nil {
 		m.logger.Error().Err(err).
 			Msg("Failed to refresh directory")
-		return fmt.Errorf("failed to refresh directory %s for provider %s: %w", dirs, m.mount.Provider, err)
-	}
-	return nil
-}
-
-// PreCache pre-caches file headers for faster scanning
-// For rclone, we read small chunks to populate the VFS cache
-func (m *Manager) PreCache(filePaths []string) error {
-	if len(filePaths) == 0 {
-		return nil
-	}
-
-	for _, filePath := range filePaths {
-		if err := m.mount.preCacheFile(filePath); err != nil {
-			m.logger.Debug().Err(err).Str("file", filePath).Msg("Failed to pre-cache file")
-			// Continue with other files
-		}
+		return fmt.Errorf("failed to refresh directory %s : %w", dirs, err)
 	}
 	return nil
 }
@@ -311,7 +290,7 @@ func (m *Manager) waitForServer() {
 			return
 		}
 
-		if err := m.client.Ping(); err == nil {
+		if err := m.client.Ping(m.ctx); err == nil {
 			return
 		}
 

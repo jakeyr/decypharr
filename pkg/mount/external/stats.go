@@ -1,7 +1,9 @@
 package external
 
 import (
-	"encoding/json"
+	"context"
+
+	json "github.com/bytedance/sonic"
 
 	"github.com/sirrobot01/decypharr/internal/rclone"
 )
@@ -24,25 +26,26 @@ func (m *Manager) Stats() map[string]interface{} {
 	stats.Ready = m.IsReady()
 	stats.Enabled = true
 	stats.Type = m.Type()
+	ctx := context.Background()
 
-	coreStats, err := m.client.GetCoreStats()
+	coreStats, err := m.client.GetCoreStats(ctx)
 	if err == nil {
 		stats.Core = *coreStats
 	}
 
 	// GetReader memory usage
-	memStats, err := m.client.GetMemoryUsage()
+	memStats, err := m.client.GetMemoryUsage(ctx)
 	if err == nil {
 		stats.Memory = *memStats
 	}
 	// GetReader bandwidth stats
-	bwStats, err := m.client.GetBandwidthStats()
+	bwStats, err := m.client.GetBandwidthStats(ctx)
 	if err == nil && bwStats != nil {
 		stats.Bandwidth = *bwStats
 	}
 
 	// GetReader version info
-	versionResp, err := m.client.GetVersion()
+	versionResp, err := m.client.GetVersion(ctx)
 	if err == nil {
 		stats.Version = *versionResp
 	}

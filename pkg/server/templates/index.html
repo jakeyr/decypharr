@@ -1,12 +1,12 @@
 {{ define "index" }}
 <div class="space-y-6">
 
-    {{ if .NeedSetup }}
+    {{ if .SetupError }}
     <div role="alert" class="alert alert-warning">
         <i class="bi bi-exclamation-triangle text-xl"></i>
         <div>
             <h3 class="font-bold">Configuration Required</h3>
-            <div class="text-sm">Your configuration is incomplete. Please complete the setup in the <a href="{{.URLBase}}settings" class="link link-hover font-semibold">Settings page</a>.</div>
+            <div class="text-sm">Your configuration is incomplete ({{ .SetupError }}). Please complete the setup in the <a href="{{.URLBase}}settings" class="link link-hover font-semibold">Settings page</a>.</div>
         </div>
     </div>
     {{ end }}
@@ -21,7 +21,7 @@
                     </button>
                     <button class="btn btn-error btn-sm hidden" id="batchDeleteDebridBtn">
                         <i class="bi bi-cloud-slash"></i>
-                        <span class="hidden sm:inline">Remove From Debrid</span>
+                        <span class="hidden sm:inline">Remove From Provider</span>
                     </button>
                     <button class="btn btn-outline btn-sm" id="refreshBtn">
                         <i class="bi bi-arrow-clockwise"></i>
@@ -31,7 +31,7 @@
 
                 <div class="flex flex-wrap gap-2">
                     <div>
-                        <input type="text" placeholder="Search torrents..."
+                        <input type="text" placeholder="Search queues..."
                                class="input input-sm"
                                id="searchInput">
                     </div>
@@ -92,7 +92,10 @@
                             <i class="bi bi-tag mr-2"></i>Category
                         </th>
                         <th class="font-semibold">
-                            <i class="bi bi-cloud mr-2"></i>Debrid
+                            <i class="bi bi-diagram-3 mr-2"></i>Protocol
+                        </th>
+                        <th class="font-semibold">
+                            <i class="bi bi-cloud mr-2"></i>Provider
                         </th>
                         <th class="font-semibold">
                             <i class="bi bi-people mr-2"></i>Seeders
@@ -110,7 +113,7 @@
 
             <div class="flex flex-col sm:flex-row justify-between items-center p-6 border-t border-base-200 gap-4">
                 <div class="text-sm text-base-content/70">
-                    <span id="paginationInfo">Loading torrents...</span>
+                    <span id="paginationInfo">Loading queues...</span>
                 </div>
                 <div class="join" id="paginationControls"></div>
             </div>
@@ -122,8 +125,8 @@
             <div class="text-6xl text-base-content/30 mb-4">
                 <i class="bi bi-inbox"></i>
             </div>
-            <h3 class="text-2xl font-bold mb-2">No Torrents Found</h3>
-            <p class="text-base-content/70 mb-6">You haven't added any torrents yet. Start by adding your first download!</p>
+            <h3 class="text-2xl font-bold mb-2">No Queues Found</h3>
+            <p class="text-base-content/70 mb-6">You haven't added any items yet. Start by adding your first download!</p>
             <a href="{{.URLBase}}download" class="btn btn-primary">
                 <i class="bi bi-plus-circle mr-2"></i>Add New Download
             </a>
@@ -144,10 +147,10 @@
     </a></li>
     <hr/>
     <li><a class="menu-item text-sm text-error" data-action="delete">
-        <i class="bi bi-trash"></i>Delete Torrent
+        <i class="bi bi-trash"></i>Delete Entry
     </a></li>
     <li><a class="menu-item text-sm text-error" data-action="debrid-delete">
-        <i class="bi bi-cloud-slash"></i> Remove from Debrid
+        <i class="bi bi-cloud-slash"></i> Remove from Provider
     </a></li>
 </ul>
 
