@@ -385,6 +385,8 @@ func (m *Manager) Start(ctx context.Context) error {
 		if err := m.syncNZBs(ctx); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
 		}
+		// One-time correction for existing NZB file sizes
+		m.fixNZBFileSizes(ctx)
 	}()
 
 	// Start workers

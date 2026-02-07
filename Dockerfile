@@ -1,15 +1,23 @@
-# Stage 1: Build binaries
-FROM golang:1.25-alpine AS builder
+# xx provides cross-compilation toolchains for CGO builds
+FROM --platform=$BUILDPLATFORM tonistiigi/xx AS xx
+
+# Stage 1: Build binaries — pinned to BUILDPLATFORM so Go runs natively (fast)
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
+ARG TARGETPLATFORM
 ARG VERSION=0.0.0
 ARG CHANNEL=dev
 
+# Copy xx scripts for cross-compilation
+COPY --from=xx / /
+
 WORKDIR /app
 
-# Install CGO dependencies for rapidyenc and cgofuse
-RUN apk add --no-cache gcc g++ musl-dev libc-dev fuse-dev
+# Install cross-compilation toolchain via xx
+RUN apk add --no-cache clang lld && \
+    xx-apk add --no-cache gcc g++ musl-dev libc-dev fuse-dev
 
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
@@ -17,15 +25,16 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 COPY . .
 
-# Build main binary with CGO (for rapidyenc)
+# Build main binary — xx-go sets CC/CXX/GOOS/GOARCH automatically
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath \
+    CGO_ENABLED=1 \
+    xx-go build -trimpath \
     -ldflags="-w -s -X github.com/sirrobot01/decypharr/pkg/version.Version=${VERSION} -X github.com/sirrobot01/decypharr/pkg/version.Channel=${CHANNEL}" \
-    -o /decypharr
+    -o /decypharr && \
+    xx-verify /decypharr
 
-# Build healthcheck (no CGO needed)
+# Build healthcheck (no CGO needed, plain cross-compile)
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \

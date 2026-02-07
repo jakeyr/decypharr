@@ -49,7 +49,6 @@ func (fh *Handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRe
 	}
 
 	if fh.streamFile == nil {
-		fh.logger.Error().Msg("No DFS streaming file available")
 		return nil, syscall.EIO
 	}
 
@@ -67,7 +66,6 @@ func (fh *Handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRe
 		case errors.Is(err, context.Canceled):
 			return nil, syscall.EINTR
 		default:
-			fh.logger.Error().Err(err).Int64("offset", off).Int("size", len(dest)).Msg("DFS read error")
 			return nil, syscall.EIO
 		}
 	}

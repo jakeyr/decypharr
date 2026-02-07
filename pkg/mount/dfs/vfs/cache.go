@@ -3,8 +3,8 @@ package vfs
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -25,7 +25,9 @@ import (
 
 const (
 	metaFlushInterval = 2 * time.Second
-	cacheIdleTimeout  = 30 * time.Minute // How long to keep cache around when idle before evicting
+
+	// How long to keep unused cache items around before removing(no delete on disk, just remove from map and close file. Cleanup loop will remove from disk eventually.
+	itemIdleTimeout = 15 * time.Minute
 )
 
 // Cache manages sparse cache files for streaming
@@ -192,7 +194,7 @@ func (c *Cache) cleanup() {
 		lastAccess := item.info.ATime
 		item.mu.RUnlock()
 
-		if now.Sub(lastAccess) > cacheIdleTimeout {
+		if now.Sub(lastAccess) > itemIdleTimeout {
 			evicted = append(evicted, key)
 		}
 		return true
@@ -203,10 +205,6 @@ func (c *Cache) cleanup() {
 		if item, ok := c.items.LoadAndDelete(key); ok {
 			item.Close()
 		}
-	}
-
-	if len(evicted) > 0 {
-		c.logger.Trace().Int("evicted", len(evicted)).Msg("evicted idle items from cache map")
 	}
 
 	type candidateEntry struct {
@@ -544,7 +542,7 @@ func (item *CacheItem) StopDownloaders() {
 // ReadAt reads from the sparse file, downloading if needed
 func (item *CacheItem) ReadAt(p []byte, off int64) (int, error) {
 	if off >= item.info.Size {
-		return 0, errors.New("offset beyond file size")
+		return 0, io.EOF
 	}
 
 	// Clamp read size

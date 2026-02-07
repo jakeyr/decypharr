@@ -228,7 +228,7 @@ func (s *Storage) updateEntryItem(entry *Entry) {
 
 	for fileName, file := range entry.Files {
 		if existing, ok := item.Files[fileName]; ok {
-			if file.AddedOn.After(existing.AddedOn) {
+			if file.AddedOn.After(existing.AddedOn) || (file.AddedOn.Equal(existing.AddedOn) && file.Size != existing.Size) {
 				item.Files[fileName] = file
 			}
 		} else {

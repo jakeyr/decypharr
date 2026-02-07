@@ -191,14 +191,25 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 			continue
 		}
 
+		streamSize := int64(0)
+		for _, seg := range fileSegments {
+			streamSize += seg.Bytes
+		}
+
+		size := rarFile.UncompressedSize
+		if size <= 0 || (streamSize > 0 && size > streamSize) {
+			// Clamp to streamable size to avoid advertising bytes we can't serve.
+			size = streamSize
+		}
+
 		file := &storage.NZBFile{
-			Name:          name,
-			InternalPath:  rarFile.Name,
-			Groups:        getGroupsList(group.Groups),
-			Segments:      fileSegments, // Direct segment list with offsets!
-			Password:      password,
-			FileType:      storage.NZBFileTypeRar,
-			Size:          rarFile.UncompressedSize,
+			Name:         name,
+			InternalPath: rarFile.Name,
+			Groups:       getGroupsList(group.Groups),
+			Segments:     fileSegments, // Direct segment list with offsets!
+			Password:     password,
+			FileType:     storage.NZBFileTypeRar,
+			Size:          size,
 			IsStored:      rarFile.IsStored,
 			IsEncrypted:   rarFile.IsEncrypted, // Per-file encryption from extra area
 			EncryptionKey: rarFile.EncryptionKey,
