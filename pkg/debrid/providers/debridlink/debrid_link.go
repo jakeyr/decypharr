@@ -195,7 +195,7 @@ func (dl *DebridLink) GetTorrent(torrentId string) (*types.Torrent, error) {
 		Filename:         name,
 		OriginalFilename: name,
 		Debrid:           dl.config.Name,
-		Added:            time.Unix(t.Created, 0).Format(time.RFC3339),
+		Added:            time.Unix(t.Created, 0),
 	}
 	cfg := config.Get()
 	for _, f := range t.Files {
@@ -256,7 +256,7 @@ func (dl *DebridLink) UpdateTorrent(t *types.Torrent) error {
 	if data.HashString != "" {
 		t.InfoHash = data.HashString
 	}
-	t.Added = time.Unix(data.Created, 0).Format(time.RFC3339)
+	t.Added = time.Unix(data.Created, 0)
 	cfg := config.Get()
 	now := time.Now()
 	for _, f := range data.Files {
@@ -328,7 +328,7 @@ func (dl *DebridLink) SubmitMagnet(t *types.Torrent) (*types.Torrent, error) {
 	t.Filename = name
 	t.OriginalFilename = name
 	t.Debrid = dl.config.Name
-	t.Added = time.Unix(data.Created, 0).Format(time.RFC3339)
+	t.Added = time.Unix(data.Created, 0)
 	now := time.Now()
 	for _, f := range data.Files {
 		file := types.File{
@@ -553,7 +553,7 @@ func (dl *DebridLink) getTorrents(page, perPage int) ([]*types.Torrent, error) {
 			InfoHash:         t.HashString,
 			Files:            make(map[string]types.File),
 			Debrid:           dl.config.Name,
-			Added:            time.Unix(t.Created, 0).Format(time.RFC3339),
+			Added:            time.Unix(t.Created, 0),
 		}
 		cfg := config.Get()
 		now := time.Now()

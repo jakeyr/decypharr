@@ -270,8 +270,8 @@ func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bo
 		}
 	}
 
-	addedOn, err := time.Parse(time.RFC3339, newDebridTorrent.Added)
-	if err != nil {
+	addedOn := newDebridTorrent.Added
+	if addedOn.IsZero() {
 		addedOn = time.Now()
 	}
 

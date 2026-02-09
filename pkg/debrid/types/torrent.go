@@ -20,7 +20,7 @@ type Torrent struct {
 	Magnet           *utils.Magnet   `json:"magnet"`
 	Files            map[string]File `json:"files"`
 	Status           TorrentStatus   `json:"status"`
-	Added            string          `json:"added"`
+	Added            time.Time       `json:"added"`
 	Progress         float64         `json:"progress"`
 	Speed            int64           `json:"speed"`
 	Seeders          int             `json:"seeders"`

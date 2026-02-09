@@ -97,8 +97,7 @@ var DefaultTimeouts = TimeoutConfig{
 var timeouts = DefaultTimeouts
 
 // NewClient creates a new connection manager
-func NewClient() (*Client, error) {
-	cfg := config.Get()
+func NewClient(cfg *config.Config) (*Client, error) {
 	providers := cfg.Usenet.Providers
 	if len(providers) == 0 {
 		return nil, errors.New("no NNTP providers configured")

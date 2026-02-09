@@ -258,7 +258,7 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	torrentId := strconv.Itoa(dt.Id)
 	torrent.Id = torrentId
 	torrent.Debrid = tb.config.Name
-	torrent.Added = time.Now().Format(time.RFC3339)
+	torrent.Added = time.Now()
 
 	return torrent, nil
 }
@@ -315,7 +315,7 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 		OriginalFilename: data.Name,
 		Debrid:           tb.config.Name,
 		Files:            make(map[string]types.File),
-		Added:            data.CreatedAt.Format(time.RFC3339),
+		Added:            data.CreatedAt,
 	}
 	cfg := config.Get()
 
@@ -536,7 +536,7 @@ func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 			OriginalFilename: data.Name,
 			Debrid:           tb.config.Name,
 			Files:            make(map[string]types.File),
-			Added:            data.CreatedAt.Format(time.RFC3339),
+			Added:            data.CreatedAt,
 			InfoHash:         data.Hash,
 		}
 

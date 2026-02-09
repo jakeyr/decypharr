@@ -2,22 +2,24 @@ package storage
 
 import "github.com/sirrobot01/decypharr/internal/config"
 
-// This is for when an entry has the same infohash as an existing entry
-func handleExistingEntryMerge(existing, incoming *Entry) *Entry {
+// HandleExistingEntryMerge merges an incoming entry with an existing one that
+// shares the same infohash. This preserves placements, files, and tags from
+// the existing entry that the incoming entry may not know about.
+func HandleExistingEntryMerge(existing, incoming *Entry) *Entry {
 	// If NZB entry, ignore merging - just return incoming
 	if incoming.Protocol == config.ProtocolNZB {
 		return incoming
 	}
 	incoming.Files = mergeFiles(existing.Files, incoming.Files)
 	incoming.ActiveProvider = selectActivePlacement(existing, incoming)
-	incoming.Providers = mergePlacements(existing.Providers, incoming.Providers)
+	incoming.Providers = mergeProviders(existing.Providers, incoming.Providers)
 	incoming.Tags = mergeTags(existing.Tags, incoming.Tags)
 
 	return incoming
 }
 
-// mergePlacements merges two placement maps, preferring newer data for same debrid
-func mergePlacements(existing, incoming map[string]*ProviderEntry) map[string]*ProviderEntry {
+// mergeProviders merges two placement maps, preferring newer data for same debrid
+func mergeProviders(existing, incoming map[string]*ProviderEntry) map[string]*ProviderEntry {
 	if existing == nil {
 		return incoming
 	}

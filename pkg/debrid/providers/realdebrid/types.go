@@ -82,7 +82,7 @@ type torrentInfo struct {
 	Split            int     `json:"split"`
 	Progress         float64 `json:"progress"`
 	Status           string  `json:"status"`
-	Added            string  `json:"added"`
+	Added            time.Time  `json:"added"`
 	Files            []struct {
 		ID       int    `json:"id"`
 		Path     string `json:"path"`

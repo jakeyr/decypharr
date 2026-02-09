@@ -167,7 +167,7 @@ func New() (*Usenet, error) {
 	}
 
 	// Create NNTP client with retry configuration
-	client, err := nntp.NewClient()
+	client, err := nntp.NewClient(cfg)
 	if err != nil {
 		return nil, err
 	}

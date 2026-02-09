@@ -508,7 +508,7 @@ func (r *RealDebrid) addTorrent(t *types.Torrent) (*types.Torrent, error) {
 
 	t.Id = data.Id
 	t.Debrid = r.config.Name
-	t.Added = time.Now().Format(time.RFC3339)
+	t.Added = time.Now()
 
 	return t, nil
 }
@@ -526,7 +526,7 @@ func (r *RealDebrid) addMagnet(t *types.Torrent) (*types.Torrent, error) {
 	case http.StatusOK, http.StatusCreated:
 		t.Id = data.Id
 		t.Debrid = r.config.Name
-		t.Added = time.Now().Format(time.RFC3339)
+		t.Added = time.Now()
 		return t, nil
 
 	case 509:
@@ -547,6 +547,10 @@ func (r *RealDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 
 	switch resp.StatusCode {
 	case http.StatusOK:
+		addedOn := data.Added
+		if addedOn.IsZero() {
+			addedOn = time.Now()
+		}
 		t := &types.Torrent{
 			Id:               data.ID,
 			Name:             data.Filename,
@@ -554,7 +558,7 @@ func (r *RealDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 			Progress:         data.Progress,
 			Speed:            data.Speed,
 			Seeders:          data.Seeders,
-			Added:            data.Added,
+			Added:            addedOn,
 			Status:           types.TorrentStatus(data.Status),
 			Filename:         data.Filename,
 			OriginalFilename: data.OriginalFilename,
@@ -900,7 +904,7 @@ func (r *RealDebrid) getTorrents(offset int, limit int) (int, []*types.Torrent, 
 			Files:            make(map[string]types.File),
 			InfoHash:         t.Hash,
 			Debrid:           r.config.Name,
-			Added:            t.Added.Format(time.RFC3339),
+			Added:            t.Added,
 		}
 		for _, f := range t.Files {
 			t.Files[f.Name] = f

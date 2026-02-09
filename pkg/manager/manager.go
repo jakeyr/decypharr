@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -344,28 +345,6 @@ func (m *Manager) migrate() {
 	m.logger.Info().Msg("Automatic migration started successfully")
 }
 
-func (m *Manager) syncTorrents(ctx context.Context) {
-	// First time syncTorrents debrid -> storage
-	m.logger.Info().
-		Int("debrids", m.clients.Size()).
-		Msg("Performing initial sync of torrents from debrid clients...")
-	var wg sync.WaitGroup
-	m.clients.Range(func(name string, client debrid.Client) bool {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := m.refreshTorrents(ctx, name, client); err != nil {
-				m.logger.Error().Err(err).Str("debrid", name).Msg("Initial torrent sync failed")
-			}
-			m.RefreshEntries(false)
-		}()
-		return true
-	})
-	wg.Wait()
-	m.logger.Info().
-		Msg("Initial sync of torrents from debrid clients completed")
-}
-
 // Start starts the manager and all its components
 func (m *Manager) Start(ctx context.Context) error {
 	m.startTime = time.Now()
@@ -378,15 +357,17 @@ func (m *Manager) Start(ctx context.Context) error {
 	// run the migration process
 	m.migrate()
 
-	// Then perform initial syncTorrents
+
 	go func() {
 		m.syncTorrents(ctx)
 		// Sync NZBs
 		if err := m.syncNZBs(ctx); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
 		}
-		// One-time correction for existing NZB file sizes
-		m.fixNZBFileSizes(ctx)
+		if fixNZB := os.Getenv("DECYPHARR_FIX_NZB_SIZES"); fixNZB == "1" {
+			m.logger.Info().Msg("Starting NZB file size correction as requested by environment variable")
+			m.fixNZBFileSizes(ctx)
+		}
 	}()
 
 	// Start workers
@@ -546,13 +527,13 @@ func (m *Manager) GetEntryByName(torrentName, filename string) (*storage.Entry, 
 	return m.GetEntry(file.InfoHash)
 }
 
-func (m *Manager) AddOrUpdate(torrent *storage.Entry, callback func(t *storage.Entry)) error {
-	torrent.UpdatedAt = time.Now()
-	if err := m.storage.AddOrUpdate(torrent); err != nil {
+func (m *Manager) AddOrUpdate(entry *storage.Entry, callback func(t *storage.Entry)) error {
+	entry.UpdatedAt = time.Now()
+	if err := m.storage.AddOrUpdate(entry); err != nil {
 		return err
 	}
 	if callback != nil {
-		go callback(torrent)
+		go callback(entry)
 	}
 	return nil
 }

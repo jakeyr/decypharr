@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Tensai75/nzbparser"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/crypto"
 	"github.com/sirrobot01/decypharr/internal/nntp"
@@ -136,7 +135,16 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 	}
 
 	// Sort RAR files by volume order (.rar first, then .r00, .r01, etc.)
-	sortRARVolumesByOrder(group.Files, func(f nzbparser.NzbFile) string { return f.Filename })
+	// For obfuscated filenames that all get the same sort key, fall back to
+	// NZB file Number (upload order) which preserves the original volume sequence.
+	sort.Slice(group.Files, func(i, j int) bool {
+		oi := getRARVolumeOrder(group.Files[i].Filename)
+		oj := getRARVolumeOrder(group.Files[j].Filename)
+		if oi != oj {
+			return oi < oj
+		}
+		return group.Files[i].Number < group.Files[j].Number
+	})
 
 	volumes := buildArchiveVolumeDescriptors(group)
 	if len(volumes) == 0 {
@@ -203,12 +211,12 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 		}
 
 		file := &storage.NZBFile{
-			Name:         name,
-			InternalPath: rarFile.Name,
-			Groups:       getGroupsList(group.Groups),
-			Segments:     fileSegments, // Direct segment list with offsets!
-			Password:     password,
-			FileType:     storage.NZBFileTypeRar,
+			Name:          name,
+			InternalPath:  rarFile.Name,
+			Groups:        getGroupsList(group.Groups),
+			Segments:      fileSegments, // Direct segment list with offsets!
+			Password:      password,
+			FileType:      storage.NZBFileTypeRar,
 			Size:          size,
 			IsStored:      rarFile.IsStored,
 			IsEncrypted:   rarFile.IsEncrypted, // Per-file encryption from extra area
@@ -1050,6 +1058,26 @@ func (p *RARParser) buildSegmentsForFile(
 		return nil, fmt.Errorf("no volume parts for file %s", rarFile.Name)
 	}
 
+	// Ensure volume parts are ordered by volume index and data offset.
+	partsSorted := true
+	for i := 1; i < len(rarFile.VolumeParts); i++ {
+		prev := rarFile.VolumeParts[i-1]
+		cur := rarFile.VolumeParts[i]
+		if cur.PartNumber < prev.PartNumber ||
+			(cur.PartNumber == prev.PartNumber && cur.DataOffset < prev.DataOffset) {
+			partsSorted = false
+			break
+		}
+	}
+	if !partsSorted {
+		sort.Slice(rarFile.VolumeParts, func(i, j int) bool {
+			if rarFile.VolumeParts[i].PartNumber == rarFile.VolumeParts[j].PartNumber {
+				return rarFile.VolumeParts[i].DataOffset < rarFile.VolumeParts[j].DataOffset
+			}
+			return rarFile.VolumeParts[i].PartNumber < rarFile.VolumeParts[j].PartNumber
+		})
+	}
+
 	var fileSegments []storage.NZBSegment
 	var currentFileOffset int64 // Offset within the final extracted file
 
@@ -1071,6 +1099,11 @@ func (p *RARParser) buildSegmentsForFile(
 			continue
 		}
 
+		// Ensure part segments are ordered by their segment number.
+		sort.Slice(partSegments, func(i, j int) bool {
+			return partSegments[i].Number < partSegments[j].Number
+		})
+
 		// Append with correct file offsets
 		for i := range partSegments {
 			partSegments[i].StartOffset = currentFileOffset
@@ -1082,6 +1115,20 @@ func (p *RARParser) buildSegmentsForFile(
 
 	if len(fileSegments) == 0 {
 		return nil, fmt.Errorf("no segments built for file %s", rarFile.Name)
+	}
+
+	// Ensure segments are ordered by output offsets for streaming correctness.
+	ordered := true
+	for i := 1; i < len(fileSegments); i++ {
+		if fileSegments[i].StartOffset < fileSegments[i-1].StartOffset {
+			ordered = false
+			break
+		}
+	}
+	if !ordered {
+		sort.Slice(fileSegments, func(i, j int) bool {
+			return fileSegments[i].StartOffset < fileSegments[j].StartOffset
+		})
 	}
 
 	return fileSegments, nil

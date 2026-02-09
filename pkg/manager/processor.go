@@ -229,6 +229,13 @@ func (m *Manager) processAction(entry *storage.Entry) {
 		Str("action", string(entry.Action)).
 		Msg("Download completed, processing action")
 
+	// Merge with existing entry if same infohash already exists (e.g., same
+	// torrent on a different provider). The queue entry only knows about the
+	// provider it was queued for, so we need to preserve other placements.
+	if existing, err := m.storage.Get(entry.InfoHash); err == nil && existing != nil {
+		entry = storage.HandleExistingEntryMerge(existing, entry)
+	}
+
 	// Now add entry to the main storage
 	if err := m.AddOrUpdate(entry, func(t *storage.Entry) {
 		m.RefreshEntries(true)

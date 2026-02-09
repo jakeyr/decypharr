@@ -13,6 +13,29 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
+func (m *Manager) syncTorrents(ctx context.Context) {
+	// First time syncTorrents debrid -> storage
+	m.logger.Info().
+		Int("debrids", m.clients.Size()).
+		Msg("Performing initial sync of torrents from debrid clients...")
+	var wg sync.WaitGroup
+	m.clients.Range(func(name string, client debrid.Client) bool {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := m.refreshTorrents(ctx, name, client); err != nil {
+				m.logger.Error().Err(err).Str("debrid", name).Msg("Initial torrent sync failed")
+			}
+			m.RefreshEntries(false)
+		}()
+		return true
+	})
+	wg.Wait()
+	m.logger.Info().
+		Msg("Initial sync of torrents from debrid clients completed")
+}
+
+
 // Refresh configuration constants
 const (
 	refreshBatchSize       = 500
@@ -58,10 +81,13 @@ func (m *Manager) doRefreshTorrents(ctx context.Context, provider string, debrid
 	// Build map of current remote by infohash
 	remoteTorrentsByHash := make(map[string]*types.Torrent, len(remote))
 	for _, t := range remote {
-		if _, exists := remoteTorrentsByHash[t.InfoHash]; exists {
-			continue
+		old, exists := remoteTorrentsByHash[t.InfoHash]
+		if !exists {
+			remoteTorrentsByHash[t.InfoHash] = t
 		}
-		remoteTorrentsByHash[t.InfoHash] = t
+		if exists && t.Added.After(old.Added) {
+			remoteTorrentsByHash[t.InfoHash] = t
+		}
 	}
 
 	// Detect changes by streaming through cached entries
@@ -115,7 +141,7 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 			cachedInfoHashes[entry.InfoHash] = true
 
 			currentTorrent, onRemote := remoteTorrentsByHash[entry.InfoHash]
-			_, placementOnDebrid := entry.Providers[provider]
+			oldPlacement, placementOnDebrid := entry.Providers[provider]
 
 			if placementOnDebrid {
 				if !onRemote {
@@ -125,11 +151,9 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 					} else {
 						torrentsToUpdate = append(torrentsToUpdate, entry)
 					}
-				} else {
-
-					if update, err := entry.RunChecks(); err != nil && update {
-						torrentsToUpdate = append(torrentsToUpdate, entry)
-					}
+				} else if oldPlacement.NeedsUpdate(currentTorrent) {
+					entry.AddTorrentProvider(currentTorrent)
+					torrentsToUpdate = append(torrentsToUpdate, entry)
 				}
 			} else if onRemote {
 				newTorrents = append(newTorrents, currentTorrent)
@@ -307,9 +331,8 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Entry, error) {
 		}
 	}
 
-	// Parse added timestamp
-	addedOn, err := time.Parse(time.RFC3339, t.Added)
-	if err != nil {
+	addedOn := t.Added
+	if addedOn.IsZero() {
 		addedOn = time.Now()
 	}
 
@@ -444,3 +467,4 @@ func isComplete(files map[string]types.File) bool {
 	}
 	return true
 }
+

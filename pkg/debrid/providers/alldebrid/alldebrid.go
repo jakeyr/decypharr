@@ -177,7 +177,7 @@ func (ad *AllDebrid) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error
 	magnet := magnets[0]
 	torrentId := strconv.Itoa(magnet.ID)
 	torrent.Id = torrentId
-	torrent.Added = time.Now().Format(time.RFC3339)
+	torrent.Added = time.Now()
 
 	return torrent, nil
 }
@@ -260,7 +260,7 @@ func (ad *AllDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 		Files:            make(map[string]types.File),
 		InfoHash:         data.Hash,
 		Debrid:           ad.config.Name,
-		Added:            time.Unix(data.CompletionDate, 0).Format(time.RFC3339),
+		Added:            time.Unix(data.CompletionDate, 0),
 	}
 	t.Bytes = data.Size
 	t.Seeders = data.Seeders
@@ -301,7 +301,7 @@ func (ad *AllDebrid) UpdateTorrent(t *types.Torrent) error {
 	if data.Hash != "" {
 		t.InfoHash = data.Hash
 	}
-	t.Added = time.Unix(data.CompletionDate, 0).Format(time.RFC3339)
+	t.Added = time.Unix(data.CompletionDate, 0)
 	if status == "downloaded" {
 		t.Progress = 100
 		index := -1
@@ -416,7 +416,7 @@ func (ad *AllDebrid) GetTorrents() ([]*types.Torrent, error) {
 			Files:            make(map[string]types.File),
 			InfoHash:         magnet.Hash,
 			Debrid:           ad.config.Name,
-			Added:            time.Unix(magnet.CompletionDate, 0).Format(time.RFC3339),
+			Added:            time.Unix(magnet.CompletionDate, 0),
 		}
 		for _, f := range magnet.Files {
 			if err := cfg.IsFileAllowed(f.Name, f.Size); err != nil {

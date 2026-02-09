@@ -195,6 +195,31 @@ type ProviderEntry struct {
 	DownloadedAt *time.Time `msgpack:"downloaded_at,omitempty" json:"downloaded_at,omitempty"` // When download completed on debrid
 }
 
+// NeedsUpdate checks if this placement is stale compared to the remote torrent.
+// Returns true if the stored placement should be refreshed.
+func (p *ProviderEntry) NeedsUpdate(remote *debridTypes.Torrent) bool {
+	if p.ID != remote.Id {
+		return true // Re-added on debrid with a different ID
+	}
+	if p.Status != remote.Status {
+		return true // Status changed (e.g., downloading → downloaded)
+	}
+	remoteFiles := remote.GetFiles()
+	if len(p.Files) != len(remoteFiles) {
+		return true // File count changed
+	}
+	for _, rf := range remoteFiles {
+		pf, exists := p.Files[rf.Name]
+		if !exists {
+			return true // New file appeared
+		}
+		if pf.Link == "" && rf.Link != "" {
+			return true // Link became available
+		}
+	}
+	return false
+}
+
 func (p *ProviderEntry) IsValid() bool {
 	if p.ID == "" || p.Provider == "" {
 		return false

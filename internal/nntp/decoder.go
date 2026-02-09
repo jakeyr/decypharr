@@ -13,10 +13,12 @@ import (
 type YencMetadata struct {
 	Name     string // filename
 	Size     int64  // total file size
-	Part     int    // part number
-	Total    int    // total parts
+	Part     int64  // part number
+	Total    int64  // total parts
 	Begin    int64  // part start byte
 	End      int64  // part end byte
+	Offset   int64  // part offset within the file
+	PartSize int64  // part size (decoded)
 	LineSize int    // line length
 	Snippet  []byte
 }
@@ -144,11 +146,11 @@ func parseYBeginHeader(buf *bufio.Reader, metadata *YencMetadata) error {
 					}
 				case "part":
 					if value, err := strconv.Atoi(kv[1]); err == nil {
-						metadata.Part = value
+						metadata.Part = int64(value)
 					}
 				case "total":
 					if value, err := strconv.Atoi(kv[1]); err == nil {
-						metadata.Total = value
+						metadata.Total = int64(value)
 					}
 				}
 			}
