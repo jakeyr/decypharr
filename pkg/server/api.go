@@ -383,8 +383,14 @@ func (s *Server) handleDeleteTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var cleanup func(torrent *storage.Entry) error
+
 	if removeFromDebrid {
 		cleanup = func(t *storage.Entry) error {
+			exists, _ := s.manager.EntryExists(t.InfoHash)
+			if exists {
+				// Remove the entry from manager fully, which will handle removing from debrid and deleting the entry
+				return s.manager.DeleteEntry(t.InfoHash, true)
+			}
 			go s.manager.RemoveTorrentPlacements(t)
 			return nil
 		}
@@ -410,6 +416,11 @@ func (s *Server) handleDeleteTorrents(w http.ResponseWriter, r *http.Request) {
 	var cleanup func(torrent *storage.Entry) error
 	if removeFromDebrid {
 		cleanup = func(t *storage.Entry) error {
+			exists, _ := s.manager.EntryExists(t.InfoHash)
+			if exists {
+				// Remove the entry from manager fully, which will handle removing from debrid and deleting the entry
+				return s.manager.DeleteEntry(t.InfoHash, true)
+			}
 			go s.manager.RemoveTorrentPlacements(t)
 			return nil
 		}

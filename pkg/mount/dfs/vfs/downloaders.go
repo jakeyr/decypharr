@@ -832,9 +832,11 @@ func (dl *downloader) downloadChunkWithRetry(start, end int64) (int64, error) {
 				Msg("stream error, retrying")
 		}
 
+		timer := time.NewTimer(delay)
 		select {
-		case <-time.After(delay):
+		case <-timer.C:
 		case <-dl.dls.ctx.Done():
+			timer.Stop()
 			return written, dl.dls.ctx.Err()
 		}
 

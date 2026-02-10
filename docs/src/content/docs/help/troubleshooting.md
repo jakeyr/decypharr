@@ -39,22 +39,6 @@ chmod +x decypharr
 
 ## Authentication Issues
 
-### Forgot password
-
-**Docker:**
-```bash
-docker exec -it decypharr rm /config/config.json
-docker restart decypharr
-```
-
-**Binary:**
-```bash
-rm ~/.config/decypharr/config.json
-./decypharr
-```
-
-Setup wizard will restart.
-
 ### API token not working
 
 1. Regenerate token:

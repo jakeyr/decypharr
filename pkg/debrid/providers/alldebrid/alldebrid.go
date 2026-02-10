@@ -102,7 +102,7 @@ func (ad *AllDebrid) doAccountRequest(account *account.Account, endpoint string,
 	}
 	defer resp.Body.Close()
 
-	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
 		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
 			return resp, err
 		}
@@ -137,15 +137,9 @@ func (ad *AllDebrid) doRequest(endpoint string, queryParams map[string]string, r
 	}
 	defer resp.Body.Close()
 
-	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
+	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
+		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
 			return resp, err
-		}
-		if len(body) > 0 {
-			if err := json.Unmarshal(body, result); err != nil {
-				return resp, err
-			}
 		}
 	}
 

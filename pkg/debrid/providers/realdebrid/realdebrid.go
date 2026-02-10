@@ -126,15 +126,9 @@ func (r *RealDebrid) doGet(endpoint string, result interface{}) (*http.Response,
 	}
 	defer resp.Body.Close()
 
-	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
+	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
+		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
 			return resp, err
-		}
-		if len(body) > 0 {
-			if err := json.Unmarshal(body, result); err != nil {
-				return resp, err
-			}
 		}
 	}
 
@@ -160,15 +154,9 @@ func (r *RealDebrid) doPostForm(endpoint string, formData map[string]string, res
 	}
 	defer resp.Body.Close()
 
-	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
+	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
+		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
 			return resp, err
-		}
-		if len(body) > 0 {
-			if err := json.Unmarshal(body, result); err != nil {
-				return resp, err
-			}
 		}
 	}
 
@@ -196,15 +184,9 @@ func (r *RealDebrid) doPut(endpoint string, body []byte, contentType string, res
 	}
 	defer resp.Body.Close()
 
-	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		respBody, err := io.ReadAll(resp.Body)
-		if err != nil {
+	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
+		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
 			return resp, err
-		}
-		if len(respBody) > 0 {
-			if err := json.Unmarshal(respBody, result); err != nil {
-				return resp, err
-			}
 		}
 	}
 
@@ -237,15 +219,9 @@ func (r *RealDebrid) doGetWithClient(client *request.Client, fullURL string, que
 	}
 	defer resp.Body.Close()
 
-	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
+	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
+		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
 			return resp, err
-		}
-		if len(body) > 0 {
-			if err := json.Unmarshal(body, result); err != nil {
-				return resp, err
-			}
 		}
 	}
 
@@ -271,20 +247,17 @@ func (r *RealDebrid) doPostFormWithClient(client *request.Client, fullURL string
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return resp, err
-	}
-
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if result != nil && len(body) > 0 {
-			if err := json.Unmarshal(body, result); err != nil {
+		if result != nil && resp.ContentLength != 0 {
+			if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
 				return resp, err
 			}
 		}
 	} else {
-		if errorResult != nil && len(body) > 0 {
-			_ = json.Unmarshal(body, errorResult)
+		if errorResult != nil && resp.ContentLength != 0 {
+			if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(errorResult); err != nil {
+				return resp, err
+			}
 		}
 	}
 
@@ -877,13 +850,8 @@ func (r *RealDebrid) getTorrents(offset int, limit int) (int, []*types.Torrent, 
 		return 0, torrents, fmt.Errorf("realdebrid API error: %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, torrents, err
-	}
-
 	var data []TorrentsResponse
-	if err := json.Unmarshal(body, &data); err != nil {
+	if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return 0, torrents, err
 	}
 

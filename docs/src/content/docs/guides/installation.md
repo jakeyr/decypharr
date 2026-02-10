@@ -63,10 +63,9 @@ Download the latest release from [GitHub Releases](https://github.com/sirrobot01
 tar -xzf decypharr_linux_amd64.tar.gz
 
 # Run
-./decypharr
+./decypharr --config /path/to/
 ```
 
-Config file will be created at `~/.config/decypharr/config.json`.
 
 ## Next Steps
 

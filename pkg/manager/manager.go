@@ -543,6 +543,10 @@ func (m *Manager) GetEntry(infohash string) (*storage.Entry, error) {
 	return m.storage.Get(infohash)
 }
 
+func (m *Manager) EntryExists(infohash string) (bool, error) {
+	return m.storage.Exists(infohash)
+}
+
 func (m *Manager) GetTorrents(filter func(*storage.Entry) bool) ([]*storage.Entry, error) {
 	// Use streaming to avoid loading all torrents into memory at once
 	var torrents []*storage.Entry

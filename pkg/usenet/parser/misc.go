@@ -3,7 +3,6 @@ package parser
 import (
 	"bytes"
 	"fmt"
-	"math"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -241,86 +240,54 @@ func getNZBSegments(index int, file nzbparser.NzbFile, group *FileGroup) (int64,
 		return file.Segments[i].Number < file.Segments[j].Number
 	})
 
-	// Build segments in sorted order without inserting gaps.
-	nzbSegments := make([]storage.NZBSegment, 0, len(file.Segments))
+	// Find the max segment number to properly size the array
+	maxSegNum := 0
+	for _, seg := range file.Segments {
+		if seg.Number > maxSegNum {
+			maxSegNum = seg.Number
+		}
+	}
+
+	// Handle case where segment numbers start at 0 or 1
+	nzbSegments := make([]storage.NZBSegment, maxSegNum)
 
 	currentOffset := int64(0)
 	metadata := group.getMetadata()
 
-	// Prefer per-file metadata when available (e.g., from yEnc headers)
-	fileSize := int64(0)
-	segmentSizeHint := int64(0)
-	if group != nil && group.fileMeta != nil {
-		if metaKey := fileMetaKey(file); metaKey != "" {
-			if meta, ok := group.fileMeta[metaKey]; ok {
-				fileSize = meta.fileSize
-				segmentSizeHint = meta.segmentSize
-			}
-		}
-	}
-
-	// Fall back to group-level metadata
-	if fileSize <= 0 && group != nil {
-		fileSize = metadata.fileSize
-		if index == len(group.Files)-1 {
-			fileSize = metadata.lastFileSize
-		}
-	}
-	if segmentSizeHint <= 0 {
-		segmentSizeHint = metadata.segmentSize
-	}
-
-	// Sum encoded bytes for ratio-based sizing when we know the decoded file size.
-	var sumEncoded int64
-	for _, seg := range file.Segments {
-		if seg.Bytes > 0 {
-			sumEncoded += int64(seg.Bytes)
-		}
-	}
-	useRatio := fileSize > 0 && sumEncoded > 0
-	ratio := 0.0
-	if useRatio {
-		ratio = float64(fileSize) / float64(sumEncoded)
-		if ratio <= 0 || ratio > 1.2 {
-			useRatio = false
-		}
+	fileSize := metadata.fileSize
+	if index == len(group.Files)-1 {
+		fileSize = metadata.lastFileSize
 	}
 
 	for idx, segment := range file.Segments {
-		var segSize int64
-		if useRatio {
-			if idx == len(file.Segments)-1 {
-				remaining := fileSize - currentOffset
-				if remaining > 0 {
-					segSize = remaining
-				} else {
-					segSize = int64(math.Round(float64(segment.Bytes) * ratio))
-				}
+		segSize := metadata.segmentSize
+		if idx == len(file.Segments)-1 {
+			// Last segment may be smaller
+			// Last segment calculation
+			// Check if the file size metadata assumes a different file (e.g. mixed groups)
+			// Expected total size if all segments were full
+			fullSegsSize := metadata.segmentSize * int64(len(file.Segments)-1) // size of all previous segments
+
+			// If fileSize is inconsistent with the number of segments (too small or too large),
+			// fallback to estimation for this last segment.
+			// Threshold: if difference > 1.5 segments
+			isSizeMismatch := false
+			expectedTotal := fullSegsSize + metadata.segmentSize // rough estimate
+			diff := fileSize - expectedTotal
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff > (metadata.segmentSize*3)/2 {
+				isSizeMismatch = true
+			}
+
+			if isSizeMismatch {
+				// Fallback: estimate from encoded bytes
+				segSize = int64(float64(segment.Bytes) * 0.97)
 			} else {
-				segSize = int64(math.Round(float64(segment.Bytes) * ratio))
-			}
-		} else {
-			segSize = int64(segment.Bytes)
-			if segSize <= 0 {
-				segSize = segmentSizeHint
-				if segSize <= 0 {
-					segSize = 750 * 1024 // Typical usenet segment size
-				}
-			}
-
-			// Last segment: clamp to the known file size if available.
-			if idx == len(file.Segments)-1 && fileSize > 0 {
-				remaining := fileSize - currentOffset
-				if remaining > 0 {
-					segSize = remaining
-				}
+				segSize = fileSize - fullSegsSize
 			}
 		}
-
-		if segSize <= 0 {
-			continue
-		}
-
 		seg := storage.NZBSegment{
 			Number:      segment.Number,
 			MessageID:   segment.Id,
@@ -330,7 +297,11 @@ func getNZBSegments(index int, file nzbparser.NzbFile, group *FileGroup) (int64,
 			Group:       group.BaseName,
 		}
 
-		nzbSegments = append(nzbSegments, seg)
+		// Bounds check: segment.Number is 1-indexed, array is 0-indexed
+		segIdx := segment.Number - 1
+		if segIdx >= 0 && segIdx < len(nzbSegments) {
+			nzbSegments[segIdx] = seg
+		}
 		currentOffset += segSize
 	}
 	return currentOffset, nzbSegments

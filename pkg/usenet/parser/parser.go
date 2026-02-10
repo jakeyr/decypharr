@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"math"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -33,9 +32,10 @@ type NZBParser struct {
 }
 
 type fileAnalysisResult struct {
-	fileSize     int64 // Size of a typical part (decoded). Last part can be smaller.
-	lastFileSize int64 // Size of the last part (decoded).
-	segmentSize  int64
+	fileSize     int64 // Total decoded size of the NZB file entry.
+	lastFileSize int64 // Total decoded size of the last NZB file entry in the group.
+	segmentSize  int64 // Decoded size of a single yEnc part/segment.
+	totalParts   int64 // Total yEnc parts for the file entry (if provided).
 }
 
 type contentResult struct {
@@ -366,7 +366,7 @@ func (p *NZBParser) batchDetectContentTypes(ctx context.Context, unknownFiles []
 
 	mapped := mapper.Map(unknownFiles, func(f *nzbparser.NzbFile) contentResult {
 		// You can still pass ctx through to your inner function.
-		detectedType, actualFilename, fileSize, segmentSize, partNumber, partBegin, err := p.detectFileTypeByContent(ctx, *f)
+		detectedType, actualFilename, err := p.detectFileTypeByContent(ctx, *f)
 		if err != nil {
 			p.logger.Trace().
 				Err(err).
@@ -378,14 +378,16 @@ func (p *NZBParser) batchDetectContentTypes(ctx context.Context, unknownFiles []
 			file:           *f,
 			fileType:       detectedType,
 			actualFilename: actualFilename,
-			fileSize:       fileSize,
-			segmentSize:    segmentSize,
-			partNumber:     partNumber,
-			partBegin:      partBegin,
 		}
 	})
 
-	return mapped
+	processed := make([]contentResult, 0, len(mapped))
+	for _, r := range mapped {
+		if r.fileType != storage.NZBFileTypeUnknown {
+			processed = append(processed, r)
+		}
+	}
+	return processed
 }
 
 // Group already processed files (fast)
@@ -725,25 +727,6 @@ func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGrou
 
 	segmentSize := yencData.End - yencData.Begin + 1
 	fileSize := yencData.Size
-	if fileSize > 0 {
-		var sumBytes int64
-		for _, seg := range firstFile.Segments {
-			sumBytes += int64(seg.Bytes)
-		}
-		if sumBytes > 0 && fileSize > sumBytes*2 {
-			// Likely multipart yEnc full-file size; estimate decoded size from segment ratio.
-			if segmentSize > 0 && firstFile.Segments[0].Bytes > 0 {
-				ratio := float64(segmentSize) / float64(firstFile.Segments[0].Bytes)
-				if ratio > 0 && ratio < 1.2 {
-					fileSize = int64(math.Round(float64(sumBytes) * ratio))
-				} else {
-					fileSize = sumBytes
-				}
-			} else {
-				fileSize = sumBytes
-			}
-		}
-	}
 
 	// get last file size
 	var lastFileSize int64
@@ -761,25 +744,6 @@ func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGrou
 			return fmt.Errorf("failed to fetch last segment header: %w", lastResult.err)
 		}
 		lastFileSize = lastResult.data.Size
-		if lastFileSize > 0 {
-			var sumBytes int64
-			for _, seg := range lastFile.Segments {
-				sumBytes += int64(seg.Bytes)
-			}
-			if sumBytes > 0 && lastFileSize > sumBytes*2 {
-				lastSegmentSize := lastResult.data.End - lastResult.data.Begin + 1
-				if lastSegmentSize > 0 && lastFile.Segments[0].Bytes > 0 {
-					ratio := float64(lastSegmentSize) / float64(lastFile.Segments[0].Bytes)
-					if ratio > 0 && ratio < 1.2 {
-						lastFileSize = int64(math.Round(float64(sumBytes) * ratio))
-					} else {
-						lastFileSize = sumBytes
-					}
-				} else {
-					lastFileSize = sumBytes
-				}
-			}
-		}
 	}
 
 	group.metadata = &fileAnalysisResult{
@@ -797,91 +761,9 @@ func (p *NZBParser) processMediaFile(group *FileGroup, password string) *storage
 	}
 
 	// Sort files for consistent ordering
-	getMeta := func(f nzbparser.NzbFile) filePartMeta {
-		if group != nil && group.fileMeta != nil {
-			if key := fileMetaKey(f); key != "" {
-				if meta, ok := group.fileMeta[key]; ok {
-					return meta
-				}
-			}
-		}
-		return filePartMeta{}
-	}
-
 	sort.Slice(group.Files, func(i, j int) bool {
-		mi := getMeta(group.Files[i])
-		mj := getMeta(group.Files[j])
-		if mi.partBegin > 0 && mj.partBegin > 0 && mi.partBegin != mj.partBegin {
-			return mi.partBegin < mj.partBegin
-		}
-		if mi.partNumber > 0 && mj.partNumber > 0 && mi.partNumber != mj.partNumber {
-			return mi.partNumber < mj.partNumber
-		}
-		if group.Files[i].Number != group.Files[j].Number {
-			return group.Files[i].Number < group.Files[j].Number
-		}
-		return group.Files[i].Filename < group.Files[j].Filename
+		return group.Files[i].Number < group.Files[j].Number
 	})
-
-	// Debug: log per-part segment stats to diagnose offset issues
-	for idx := range group.Files {
-		nzbFile := group.Files[idx]
-		if len(nzbFile.Segments) == 0 {
-			continue
-		}
-		sort.Slice(nzbFile.Segments, func(i, j int) bool {
-			return nzbFile.Segments[i].Number < nzbFile.Segments[j].Number
-		})
-
-		minNum := nzbFile.Segments[0].Number
-		maxNum := nzbFile.Segments[len(nzbFile.Segments)-1].Number
-		prev := minNum
-		gaps := 0
-		zeroBytes := 0
-		sumBytes := int64(0)
-		for i, seg := range nzbFile.Segments {
-			if seg.Bytes <= 0 {
-				zeroBytes++
-			} else {
-				sumBytes += int64(seg.Bytes)
-			}
-			if i > 0 {
-				if seg.Number-prev > 1 {
-					gaps += seg.Number - prev - 1
-				}
-				prev = seg.Number
-			}
-		}
-
-		meta := filePartMeta{}
-		if group.fileMeta != nil {
-			if key := fileMetaKey(nzbFile); key != "" {
-				if m, ok := group.fileMeta[key]; ok {
-					meta = m
-				}
-			}
-		}
-
-		p.logger.Debug().
-			Str("group", group.BaseName).
-			Str("actual_name", group.ActualFilename).
-			Int("file_index", idx).
-			Int("file_number", nzbFile.Number).
-			Str("subject", nzbFile.Subject).
-			Int("segments", len(nzbFile.Segments)).
-			Int("seg_min", minNum).
-			Int("seg_max", maxNum).
-			Int("seg_gaps", gaps).
-			Int("zero_bytes", zeroBytes).
-			Int("first_bytes", nzbFile.Segments[0].Bytes).
-			Int("last_bytes", nzbFile.Segments[len(nzbFile.Segments)-1].Bytes).
-			Int64("sum_bytes", sumBytes).
-			Int64("yenc_part_size", meta.fileSize).
-			Int64("yenc_seg_size", meta.segmentSize).
-			Int64("yenc_part_num", meta.partNumber).
-			Int64("yenc_part_begin", meta.partBegin).
-			Msg("NZB media part stats")
-	}
 
 	// Determine extension
 	ext := determineExtension(group)
@@ -912,9 +794,9 @@ func (p *NZBParser) processMediaFile(group *FileGroup, password string) *storage
 	return file
 }
 
-func (p *NZBParser) detectFileTypeByContent(ctx context.Context, file nzbparser.NzbFile) (storage.NZBFileType, string, int64, int64, int64, int64, error) {
+func (p *NZBParser) detectFileTypeByContent(ctx context.Context, file nzbparser.NzbFile) (storage.NZBFileType, string, error) {
 	if len(file.Segments) == 0 {
-		return storage.NZBFileTypeUnknown, "", 0, 0, 0, 0, fmt.Errorf("no segments in file %s", file.Filename)
+		return storage.NZBFileTypeUnknown, "", fmt.Errorf("no segments in file %s", file.Filename)
 	}
 
 	// Download first segment to check file signature
@@ -926,40 +808,17 @@ func (p *NZBParser) detectFileTypeByContent(ctx context.Context, file nzbparser.
 		return e
 	})
 	if err != nil {
-		return storage.NZBFileTypeUnknown, "", 0, 0, 0, 0, fmt.Errorf("failed to fetch segment header for file %s: %w", file.Filename, err)
+		return storage.NZBFileTypeUnknown, "", fmt.Errorf("failed to fetch segment header for file %s: %w", file.Filename, err)
 	}
-
-	// Sum segment bytes for sanity checks
-	var sumBytes int64
-	for _, seg := range file.Segments {
-		sumBytes += int64(seg.Bytes)
-	}
-
-	fileSize := data.Size
-	if fileSize > 0 && sumBytes > 0 && fileSize > sumBytes*2 {
-		// Likely full-file size from multipart yEnc; ignore for per-part sizing.
-		fileSize = 0
-	}
-	segmentSize := data.PartSize
-	if segmentSize <= 0 && data.End > 0 && data.End >= data.Begin {
-		segmentSize = data.End - data.Begin + 1
-	}
-	if segmentSize > 0 && sumBytes > 0 && segmentSize > sumBytes {
-		// Segment size shouldn't exceed the part size from NZB segments.
-		segmentSize = 0
-	}
-
-	partNumber := data.Part
-	partBegin := data.Begin
 
 	if data.Name != "" {
 		fileType := p.detectFileType(data.Name)
 		if fileType != storage.NZBFileTypeUnknown {
-			return fileType, data.Name, fileSize, segmentSize, partNumber, partBegin, nil
+			return fileType, data.Name, nil
 		}
 	}
 
-	return p.detectFileTypeFromContent(data.Snippet), data.Name, fileSize, segmentSize, partNumber, partBegin, nil
+	return p.detectFileTypeFromContent(data.Snippet), data.Name, nil
 }
 
 func (p *NZBParser) detectFileTypeFromContent(data []byte) storage.NZBFileType {

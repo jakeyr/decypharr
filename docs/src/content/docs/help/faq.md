@@ -303,7 +303,7 @@ Delete config to restart setup:
 ```bash
 rm /config/config.json  # Docker
 # or
-rm ~/.config/decypharr/config.json  # Binary
+rm /path/to/config.json  # Binary
 ```
 
 ### High CPU/Memory usage

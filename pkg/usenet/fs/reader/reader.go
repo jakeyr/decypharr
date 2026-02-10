@@ -14,6 +14,14 @@ import (
 
 var decryptionBufPool = sync.Pool{}
 
+const defaultSegBufSize = 1024 * 1024 // 1MB — covers typical usenet segments (~750KB)
+
+var segReadPool = sync.Pool{
+	New: func() any {
+		return make([]byte, defaultSegBufSize)
+	},
+}
+
 func acquireDecryptionBuffer(size int) []byte {
 	v := decryptionBufPool.Get()
 	if v == nil {
@@ -208,15 +216,20 @@ func (sr *StreamingReader) readAtPlain(p []byte, off int64) (int, error) {
 
 	sr.stats.BytesRead.Add(int64(n))
 
-	if eofAfter && err == nil && int64(n) == readLen {
+	if eofAfter && int64(n) == readLen {
 		return n, io.EOF
 	}
 	return n, err
 }
 
 // readFromCache reads data from the cache, handling segment boundaries.
+// Uses a pooled scratch buffer to avoid per-segment heap allocations.
 func (sr *StreamingReader) readFromCache(p []byte, off int64, startSeg, endSeg int) (int, error) {
 	totalRead := 0
+
+	// Get a reusable scratch buffer from pool
+	scratch := segReadPool.Get().([]byte)
+	defer segReadPool.Put(scratch)
 
 	for segIdx := startSeg; segIdx <= endSeg; segIdx++ {
 		// Wait for segment to be ready
@@ -224,8 +237,18 @@ func (sr *StreamingReader) readFromCache(p []byte, off int64, startSeg, endSeg i
 			return totalRead, err
 		}
 
-		// Get segment data
-		data, ok := sr.cache.Get(segIdx)
+		// Ensure scratch buffer is large enough for this segment
+		segSize := sr.cache.SegmentDataSize(segIdx)
+		var buf []byte
+		if int64(cap(scratch)) >= segSize {
+			buf = scratch[:segSize]
+		} else {
+			// Rare: segment larger than pool buffer, allocate one-off
+			buf = make([]byte, segSize)
+		}
+
+		// Read segment data into buffer (no allocation in the common case)
+		n, ok := sr.cache.ReadInto(segIdx, buf)
 		if !ok {
 			// This should not happen with pin/unpin, but handle gracefully
 			sr.logger.Warn().Int("segment", segIdx).Msg("segment data missing after wait")
@@ -234,11 +257,12 @@ func (sr *StreamingReader) readFromCache(p []byte, off int64, startSeg, endSeg i
 			if err := sr.fetcher.Fetch(sr.ctx, segIdx); err != nil {
 				return totalRead, fmt.Errorf("re-fetch segment %d: %w", segIdx, err)
 			}
-			data, ok = sr.cache.Get(segIdx)
+			n, ok = sr.cache.ReadInto(segIdx, buf)
 			if !ok {
 				return totalRead, fmt.Errorf("segment %d still missing after re-fetch", segIdx)
 			}
 		}
+		data := buf[:n]
 
 		// Calculate what portion of this segment we need
 		segStart := sr.cache.SegmentOffset(segIdx)
@@ -257,7 +281,7 @@ func (sr *StreamingReader) readFromCache(p []byte, off int64, startSeg, endSeg i
 		segDataOffset := readStart - segStart
 		copyLen := readEnd - readStart
 
-		// Bounds check — empty segment data means the article was corrupted
+		// Defensive bounds check
 		if segDataOffset < 0 || segDataOffset >= int64(len(data)) {
 			return totalRead, fmt.Errorf("segment %d has no data (expected %d bytes at offset %d)",
 				segIdx, segEnd-segStart, segStart)
@@ -267,8 +291,8 @@ func (sr *StreamingReader) readFromCache(p []byte, off int64, startSeg, endSeg i
 			copyLen = availableInSeg
 		}
 
-		n := copy(p[outOffset:outOffset+copyLen], data[segDataOffset:segDataOffset+copyLen])
-		totalRead += n
+		copied := copy(p[outOffset:outOffset+copyLen], data[segDataOffset:segDataOffset+copyLen])
+		totalRead += copied
 	}
 
 	return totalRead, nil

@@ -21,14 +21,13 @@ require (
 	github.com/rs/zerolog v1.33.0
 	github.com/sourcegraph/conc v0.3.0
 	github.com/stanNthe5/stringbuf v0.0.3
-	github.com/vmihailenco/msgpack/v5 v5.4.1
 	github.com/winfsp/cgofuse v1.6.0
-	go.etcd.io/bbolt v1.4.3
 	go.uber.org/ratelimit v0.3.1
 	go4.org v0.0.0-20200411211856-f5505b9728dd
 	golang.org/x/crypto v0.42.0
 	golang.org/x/net v0.43.0
 	golang.org/x/sync v0.18.0
+	golang.org/x/sys v0.38.0
 	google.golang.org/protobuf v1.36.7
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
@@ -62,10 +61,8 @@ require (
 	github.com/spf13/afero v1.14.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect
-	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
-	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.29.0 // indirect
 )

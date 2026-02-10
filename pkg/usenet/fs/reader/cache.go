@@ -217,6 +217,46 @@ func (sc *SegmentCache) Get(segIdx int) ([]byte, bool) {
 	return nil, false
 }
 
+// ReadInto reads segment data into the provided buffer, avoiding allocation.
+// Returns the number of bytes read and whether the segment was available.
+// buf must be at least SegmentDataSize(segIdx) bytes.
+func (sc *SegmentCache) ReadInto(segIdx int, buf []byte) (int, bool) {
+	if segIdx < 0 || segIdx >= sc.segCount {
+		return 0, false
+	}
+
+	state := SegmentState(sc.states[segIdx].Load())
+
+	if state == StateOnDisk {
+		n, err := sc.loadFromDiskInto(segIdx, buf)
+		if err != nil {
+			sc.logger.Warn().Err(err).Int("segment", segIdx).Msg("failed to load from disk")
+			sc.stats.CacheMisses.Add(1)
+			return 0, false
+		}
+		sc.stats.CacheHits.Add(1)
+		return n, true
+	}
+
+	sc.stats.CacheMisses.Add(1)
+	return 0, false
+}
+
+// SegmentDataSize returns the stored or expected size of a segment's data.
+func (sc *SegmentCache) SegmentDataSize(segIdx int) int64 {
+	if segIdx < 0 || segIdx >= sc.segCount {
+		return 0
+	}
+	size := sc.segLengths[segIdx].Load()
+	if size <= 0 {
+		size = sc.segments[segIdx].Bytes
+		if size <= 0 {
+			size = sc.segOffsets[segIdx+1] - sc.segOffsets[segIdx]
+		}
+	}
+	return size
+}
+
 // Put stores segment data in the cache.
 func (sc *SegmentCache) Put(segIdx int, data []byte) error {
 	return sc.PutDirect(segIdx, data)
@@ -375,6 +415,30 @@ func (sc *SegmentCache) loadFromDisk(segIdx int) ([]byte, error) {
 	}
 
 	return data[:n], nil
+}
+
+// loadFromDiskInto reads segment data from disk into the provided buffer.
+func (sc *SegmentCache) loadFromDiskInto(segIdx int, buf []byte) (int, error) {
+	if !sc.onDisk[segIdx].Load() {
+		return 0, fmt.Errorf("segment %d not on disk", segIdx)
+	}
+
+	offset := sc.segOffsets[segIdx]
+	size := sc.SegmentDataSize(segIdx)
+
+	if int64(len(buf)) < size {
+		return 0, fmt.Errorf("buffer too small for segment %d: need %d, have %d", segIdx, size, len(buf))
+	}
+
+	sc.diskMu.Lock()
+	n, err := sc.diskFile.ReadAt(buf[:size], offset)
+	sc.diskMu.Unlock()
+
+	if err != nil && err != io.EOF {
+		return 0, fmt.Errorf("read segment %d from disk: %w", segIdx, err)
+	}
+
+	return n, nil
 }
 
 // PinRange marks segments as in-use, preventing eviction.

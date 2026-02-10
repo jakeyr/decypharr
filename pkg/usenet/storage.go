@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
@@ -33,7 +32,6 @@ type NZBStorage struct {
 	metaDir string
 	logger  zerolog.Logger
 	mu      sync.RWMutex // Protects file operations
-	cache   *lru.Cache[string, *storage.NZB]
 }
 
 // NewNZBStorage creates a new file-based NZB storage
@@ -43,11 +41,9 @@ func NewNZBStorage() (*NZBStorage, error) {
 		return nil, fmt.Errorf("failed to create meta directory: %w", err)
 	}
 
-	cache, _ := lru.New[string, *storage.NZB](1000) // Cache up to 1000 NZBs
 	return &NZBStorage{
 		metaDir: metaDir,
 		logger:  logger.New("nzb-storage"),
-		cache:   cache,
 	}, nil
 }
 
@@ -80,20 +76,11 @@ func (s *NZBStorage) AddNZB(nzb *storage.NZB) error {
 		return fmt.Errorf("failed to rename NZB meta file: %w", err)
 	}
 
-	// Update cache
-	s.cache.Add(nzb.ID, nzb)
-
 	return nil
 }
 
-// GetNZB retrieves an NZB from file storage (with caching)
+// GetNZB retrieves an NZB from file storage
 func (s *NZBStorage) GetNZB(id string) (*storage.NZB, error) {
-	// Fast path: check cache first
-	if nzb, ok := s.cache.Get(id); ok {
-		return nzb, nil
-	}
-
-	// Slow path: load from disk
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -111,21 +98,13 @@ func (s *NZBStorage) GetNZB(id string) (*storage.NZB, error) {
 		return nil, fmt.Errorf("failed to unmarshal NZB: %w", err)
 	}
 
-	nzb := protoToNZB(&pb)
-
-	// Store in cache for future lookups
-	s.cache.Add(id, nzb)
-
-	return nzb, nil
+	return protoToNZB(&pb), nil
 }
 
 // DeleteNZB removes an NZB from file storage
 func (s *NZBStorage) DeleteNZB(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	// Remove from cache
-	s.cache.Remove(id)
 
 	path := s.metaFilePath(id)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -230,18 +209,7 @@ func (s *NZBStorage) Stats() map[string]interface{} {
 		"count":       count,
 		"total_bytes": totalSize,
 		"meta_dir":    s.metaDir,
-		"cache_size":  s.cache.Len(),
 	}
-}
-
-// InvalidateCache removes an entry from the cache (call after external updates)
-func (s *NZBStorage) InvalidateCache(id string) {
-	s.cache.Remove(id)
-}
-
-// ClearCache removes all entries from the cache
-func (s *NZBStorage) ClearCache() {
-	s.cache.Purge()
 }
 
 // ============================================================================
