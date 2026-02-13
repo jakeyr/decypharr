@@ -83,17 +83,12 @@ func NewStorage(dbPath string) (*Storage, error) {
 		logger:     log,
 	}
 
-	// Migrate metadata to new format (adds Protocol, Bad, AddedOn to index)
-	go func() {
-		if count, err := s.MigrateMetadata(); err != nil {
-			log.Warn().Err(err).Msg("Metadata migration failed")
-		} else if count > 0 {
-			log.Info().Int("count", count).Msg("Migrated entry metadata to new format")
-		}
-
-		// Migrate from legacy storage if it exists
-		s.migrateFromLegacy()
-	}()
+	if count, err := s.MigrateMetadata(); err != nil {
+		log.Warn().Err(err).Msg("Metadata migration failed")
+	} else if count > 0 {
+		log.Info().Int("count", count).Msg("Migrated entry metadata to new format")
+	}
+	s.migrateFromLegacy()
 
 	return s, nil
 }

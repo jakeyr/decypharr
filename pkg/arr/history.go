@@ -128,6 +128,9 @@ func queueFilter(q QueueSchema) QueueAction {
 				if strings.Contains(strings.ToLower(strings.Join(m.Messages, " ")), "downloaded file is empty") {
 					return QueueActionBlocklist
 				}
+				if strings.Contains(strings.ToLower(strings.Join(m.Messages, " ")), "found matching series via grab history, but release was matched to series by id") {
+					return QueueActionImport
+				}
 			}
 		}
 	}

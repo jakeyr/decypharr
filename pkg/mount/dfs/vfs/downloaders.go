@@ -26,10 +26,8 @@ const (
 	maxErrorCount = 10
 	// downloaderWindow is how close a read must be to reuse a downloader
 	downloaderWindow = 4 * 1024 * 1024 // 4MB
-	// kickerInterval is how often to check waiters
+	// kickerInterval is how often the safety-net ticker checks waiters and idle timeout
 	kickerInterval = 5 * time.Second
-	// kickDebounce is the max delay before notifying waiters after new data arrives
-	kickDebounce = 20 * time.Millisecond
 	// idleTimeout is how long before stopping all downloaders due to inactivity
 	idleTimeout = 30 * time.Second
 	// circuitCooldownDuration is how long to block requests after max errors reached
@@ -110,11 +108,13 @@ type Downloaders struct {
 	// streamID is the active stream registration ID for tracking
 	streamID string
 
+	// Atomic waiter count for fast-path check (avoids locking dls.mu in Write() when no waiters)
+	waiterCount atomic.Int32
+
 	// Idle timeout tracking
 	lastActivity atomic.Int64  // Unix nano timestamp of last download activity
 	idle         atomic.Bool   // True when all downloaders stopped due to idle
 	kickerDone   chan struct{} // Signals kicker goroutine has exited
-	kickCh       chan struct{} // Non-blocking kick signals from writers
 
 	// Circuit breaker - blocks all requests when max errors reached
 	circuitOpen   atomic.Bool  // True when circuit is "open" (blocking all requests)
@@ -197,7 +197,6 @@ func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, 
 		retries:       retries,
 		// streamID is populated lazily when the first read occurs.
 		streamID: "",
-		kickCh:   make(chan struct{}, 1),
 	}
 	dls.touchActivity() // Initialize activity timestamp
 
@@ -238,6 +237,10 @@ func (dls *Downloaders) Download(r ranges.Range) error {
 	// Fast path: already have it
 	if dls.item.HasRange(r) {
 		GlobalVFSStats.CacheHits.Add(1)
+		// Proactively ensure upcoming data is being downloaded (only for sequential access)
+		if dls.pattern.isSequential() {
+			dls.ensureBufferWindowLocked(r)
+		}
 		dls.mu.Unlock()
 		return nil
 	}
@@ -247,6 +250,7 @@ func (dls *Downloaders) Download(r ranges.Range) error {
 	// Create waiter channel
 	errChan := make(chan error, 1)
 	dls.waiters = append(dls.waiters, waiter{r: r, errChan: errChan})
+	dls.waiterCount.Add(1)
 
 	// Ensure downloader running
 	if err := dls.ensureDownloaderLocked(r); err != nil {
@@ -262,22 +266,13 @@ func (dls *Downloaders) Download(r ranges.Range) error {
 	return <-errChan
 }
 
-// requestKick signals the kicker goroutine to notify waiters (non-blocking).
-func (dls *Downloaders) requestKick() {
-	if dls == nil {
-		return
-	}
-	select {
-	case dls.kickCh <- struct{}{}:
-	default:
-	}
-}
 
 // removeWaiterLocked removes a waiter by its channel (call with lock held)
 func (dls *Downloaders) removeWaiterLocked(errChan chan<- error) {
 	for i, w := range dls.waiters {
 		if w.errChan == errChan {
 			dls.waiters = append(dls.waiters[:i], dls.waiters[i+1:]...)
+			dls.waiterCount.Add(-1)
 			return
 		}
 	}
@@ -348,7 +343,7 @@ func (dls *Downloaders) newDownloaderLocked(r ranges.Range, targetEnd int64) err
 		n, err := dl.run()
 		dl.close(err)
 		dls.countErrors(n, err)
-		dls.requestKick()
+		dls.kickWaiters()
 	}()
 
 	return nil
@@ -405,6 +400,7 @@ func (dls *Downloaders) kickWaiters() {
 	// Check circuit state once to avoid spinning
 	circuitOpen := dls.circuitOpen.Load()
 
+	fulfilled := 0
 	remaining := dls.waiters[:0]
 	for _, w := range dls.waiters {
 		// Clip range to actual file size
@@ -413,9 +409,11 @@ func (dls *Downloaders) kickWaiters() {
 
 		if dls.item.HasRange(r) {
 			w.errChan <- nil // Fulfilled!
+			fulfilled++
 		} else if circuitOpen || dls.errorCount >= maxErrorCount {
 			// Circuit is open or max errors reached - fail waiter without creating new downloaders
 			w.errChan <- dls.lastErr
+			fulfilled++
 		} else {
 			remaining = append(remaining, w)
 			// Ensure there's a downloader for this waiter
@@ -423,6 +421,9 @@ func (dls *Downloaders) kickWaiters() {
 		}
 	}
 	dls.waiters = remaining
+	if fulfilled > 0 {
+		dls.waiterCount.Add(-int32(fulfilled))
+	}
 }
 
 func (dls *Downloaders) initialEnd(r ranges.Range) int64 {
@@ -481,6 +482,42 @@ func (dls *Downloaders) extendSequentialTargetLocked(r ranges.Range) {
 	}
 }
 
+// ensureBufferWindowLocked proactively starts/extends a downloader for upcoming
+// data when the current read is a cache hit. This prevents buffer starvation by
+// keeping the read-ahead window populated. Caller must hold dls.mu.
+func (dls *Downloaders) ensureBufferWindowLocked(r ranges.Range) {
+	ahead := dls.readAheadSize
+	if ahead <= 0 {
+		ahead = dls.chunkSize * 4
+	}
+	if ahead <= 0 {
+		return
+	}
+
+	// Check if the upcoming window after this read is cached
+	window := ranges.Range{
+		Pos:  r.Pos + r.Size,
+		Size: ahead,
+	}
+	if window.Pos >= dls.item.info.Size {
+		return
+	}
+	if window.Pos+window.Size > dls.item.info.Size {
+		window.Size = dls.item.info.Size - window.Pos
+	}
+	if window.Size <= 0 {
+		return
+	}
+
+	missing := dls.item.FindMissing(window)
+	if missing.Size <= 0 {
+		return // Window is fully cached
+	}
+
+	// Extend or create a downloader for the missing window
+	_ = dls.ensureDownloaderLocked(window)
+}
+
 func maxChunkSizeFor(base int64) int64 {
 	if base <= 0 {
 		return base
@@ -525,6 +562,7 @@ func (dls *Downloaders) Close(inErr error) error {
 			w.errChan <- errors.New("downloaders closed")
 		}
 	}
+	dls.waiterCount.Store(0)
 	dls.waiters = nil
 	dls.dls = nil
 	dls.mu.Unlock()
@@ -666,7 +704,9 @@ func (dls *Downloaders) ensureKickerRunning() {
 	}
 }
 
-// startKicker starts the background goroutine that debounces waiter notifications.
+// startKicker starts a background safety-net goroutine that periodically checks
+// waiters and handles idle timeout. The primary notification path is direct
+// kickWaiters() calls from cacheWriter.Write(); this ticker is only a fallback.
 func (dls *Downloaders) startKicker() {
 	dls.kickerDone = make(chan struct{})
 	dls.wg.Add(1)
@@ -677,32 +717,14 @@ func (dls *Downloaders) startKicker() {
 		ticker := time.NewTicker(kickerInterval)
 		defer ticker.Stop()
 
-		var debounceTimer *time.Timer
-		var debounceC <-chan time.Time
-
 		for {
 			select {
 			case <-ticker.C:
 				dls.kickWaiters()
 				if dls.checkIdleTimeout() {
-					if debounceTimer != nil {
-						debounceTimer.Stop()
-					}
 					return
 				}
-			case <-dls.kickCh:
-				if debounceTimer == nil {
-					debounceTimer = time.NewTimer(kickDebounce)
-					debounceC = debounceTimer.C
-				}
-			case <-debounceC:
-				debounceTimer = nil
-				debounceC = nil
-				dls.kickWaiters()
 			case <-dls.ctx.Done():
-				if debounceTimer != nil {
-					debounceTimer.Stop()
-				}
 				return
 			}
 		}
@@ -939,7 +961,7 @@ func (dl *downloader) streamChunk(start, end int64) (int64, error) {
 
 	// Final kick to notify waiters of any remaining data
 	if writer.written > 0 {
-		dl.dls.requestKick()
+		dl.dls.kickWaiters()
 	}
 
 	return writer.written, nil
@@ -1053,8 +1075,8 @@ func (w *cacheWriter) Write(p []byte) (int, error) {
 	actuallyWritten := int64(n - skipped)
 	w.written += actuallyWritten
 
-	if actuallyWritten > 0 {
-		w.dl.dls.requestKick()
+	if actuallyWritten > 0 && w.dl.dls.waiterCount.Load() > 0 {
+		w.dl.dls.kickWaiters()
 	}
 
 	return n, nil

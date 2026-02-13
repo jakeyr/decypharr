@@ -242,7 +242,8 @@ func (m *Manager) Stats() []map[string]any {
 }
 
 func (m *Manager) RefreshLinks(fetcher LinksFetcher) error {
-	wgPool := pool.New().WithMaxGoroutines(m.accounts.Size()).WithErrors()
+	workers := max(1, m.accounts.Size())
+	wgPool := pool.New().WithMaxGoroutines(workers).WithErrors()
 	m.accounts.Range(func(key string, acc *Account) bool {
 		wgPool.Go(func() error {
 			links, err := fetcher(acc)

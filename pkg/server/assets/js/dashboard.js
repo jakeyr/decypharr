@@ -219,7 +219,7 @@ class TorrentDashboard {
             }
 
             const response = await window.decypharrUtils.fetcher(`/api/torrents?${params}`);
-            if (!response.ok) throw new Error('Failed to fetch torrents');
+            if (!response.ok) throw new Error('Failed to fetch items');
 
             const data = await response.json();
             this.state.torrents = data.torrents || [];
@@ -376,8 +376,8 @@ class TorrentDashboard {
 
         this.refs.paginationInfo.textContent =
             this.state.total > 0 ?
-            `Showing ${start}-${end} of ${this.state.total} torrents` :
-            'No torrents found';
+            `Showing ${start}-${end} of ${this.state.total} items` :
+            'No items found';
 
         if (this.state.totalPages <= 1) {
             this.refs.paginationControls.innerHTML = '';
@@ -471,21 +471,21 @@ class TorrentDashboard {
     async deleteSelectedTorrents(removeFromDebrid = false) {
         if (this.state.selectedEntries.size === 0) return;
 
-        if (!confirm(`Delete ${this.state.selectedEntries.size} selected torrents?`)) return;
+        if (!confirm(`Delete ${this.state.selectedEntries.size} selected items?`)) return;
 
         try {
             const hashes = Array.from(this.state.selectedEntries).join(',');
             const url = `${window.urlBase}api/torrents?hashes=${hashes}&removeFromDebrid=${removeFromDebrid}`;
             const response = await window.decypharrUtils.fetcher(url, { method: 'DELETE' });
 
-            if (!response.ok) throw new Error('Failed to delete torrents');
+            if (!response.ok) throw new Error('Failed to delete items');
 
-            window.decypharrUtils.createToast(`Deleted ${this.state.selectedEntries.size} torrents`);
+            window.decypharrUtils.createToast(`Deleted ${this.state.selectedEntries.size} items successfully`);
             this.state.selectedEntries.clear();
             this.loadTorrents();
         } catch (error) {
-            console.error('Error deleting torrents:', error);
-            window.decypharrUtils.createToast('Failed to delete torrents', 'error');
+            console.error('Error deleting items:', error);
+            window.decypharrUtils.createToast('Failed to delete items', 'error');
         }
     }
 
