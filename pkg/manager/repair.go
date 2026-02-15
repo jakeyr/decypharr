@@ -153,7 +153,6 @@ func (m *Manager) ProbeEntryFiles(ctx context.Context, item *storage.EntryItem, 
 
 		link := cmp.Or(placementFile.Link, placementFile.Id)
 		if link == "" {
-			fmt.Println("Probe skipped for file", name, ": empty provider link")
 			result.Status = FileProbeBroken
 			result.Reason = "empty_provider_link"
 			results[name] = result
@@ -169,7 +168,6 @@ func (m *Manager) ProbeEntryFiles(ctx context.Context, item *storage.EntryItem, 
 				result.Reason = "provider_probe_error"
 			}
 		}
-		fmt.Println("Probe result for file", name, ":", result.Status, "-", result.Reason)
 		results[name] = result
 	}
 
