@@ -88,7 +88,6 @@ func NewStorage(dbPath string) (*Storage, error) {
 	} else if count > 0 {
 		log.Info().Int("count", count).Msg("Migrated entry metadata to new format")
 	}
-	s.migrateFromLegacy()
 
 	return s, nil
 }
@@ -127,22 +126,15 @@ func (s *Storage) Close() error {
 	return nil
 }
 
-// Stats returns storage statistics
-func (s *Storage) Stats() map[string]interface{} {
-	stats := make(map[string]interface{})
-	size := int64(0)
-	// Read the disk usage of the data directory
-	err := filepath.Walk(s.dir, func(_ string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() {
-			size += info.Size()
+// DiskSize returns the total on-disk size of all stores (O(1), no filesystem walk).
+func (s *Storage) DiskSize() int64 {
+	var size int64
+	for _, store := range []*hybrid.Store{s.entries, s.queue, s.entryItems, s.repairJobs, s.repairKeys} {
+		if store != nil {
+			size += store.DiskSize()
 		}
-		return nil
-	})
-	if err != nil {
-		return stats
 	}
-	stats["total_size"] = size
-	return stats
+	return size
 }
 
 // SaveMigrationStatus saves the system migration status
@@ -166,33 +158,6 @@ func (s *Storage) GetMigrationStatus() (*SystemMigrationStatus, error) {
 		return nil, err
 	}
 	return ProtoToSystemMigrationStatus(&pb), nil
-}
-
-func (s *Storage) migrateFromLegacy() {
-	// Check if decypharr.db folder exists (legacy storage)
-	legacyPath := filepath.Join(filepath.Dir(s.dir), "decypharr.db")
-	if _, err := os.Stat(legacyPath); os.IsNotExist(err) {
-		return
-	}
-
-	// Create a new storage instance for the legacy data
-	legacyStorage, err := NewStorage(legacyPath)
-	if err != nil {
-		return
-	}
-	defer legacyStorage.Close()
-
-	// Copy data from legacy storage to new storage
-	if err := s.copyFrom(legacyStorage); err != nil {
-		return
-	}
-
-	// Delete legacy storage directory after successful migration
-	if err := os.RemoveAll(legacyPath); err != nil {
-		return
-	}
-
-	return
 }
 
 func (s *Storage) copyFrom(other *Storage) error {

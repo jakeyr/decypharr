@@ -257,13 +257,9 @@ func (sc *SegmentCache) SegmentDataSize(segIdx int) int64 {
 	return size
 }
 
-// Put stores segment data in the cache.
-func (sc *SegmentCache) Put(segIdx int, data []byte) error {
-	return sc.PutDirect(segIdx, data)
-}
 
-// PutDirect writes segment data directly to disk (for streaming writes).
-func (sc *SegmentCache) PutDirect(segIdx int, data []byte) error {
+// Put writes segment data directly to disk (for streaming writes).
+func (sc *SegmentCache) Put(segIdx int, data []byte) error {
 	if segIdx < 0 || segIdx >= sc.segCount {
 		return fmt.Errorf("segment index out of range: %d", segIdx)
 	}

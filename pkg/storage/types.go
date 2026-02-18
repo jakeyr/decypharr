@@ -385,6 +385,7 @@ func (e *Entry) SwitchToNextProvider() {
 // MarkAsCompleted marks the torrent as completed
 func (e *Entry) MarkAsCompleted(contentPath string) {
 	e.State = EntryStatePausedUP
+	e.IsDownloading = false
 	e.IsComplete = true
 	e.Progress = 1.0
 	e.ContentPath = contentPath
@@ -396,6 +397,7 @@ func (e *Entry) MarkAsCompleted(contentPath string) {
 // MarkAsError marks the torrent as errored
 func (e *Entry) MarkAsError(err error) {
 	e.State = EntryStateError
+	e.IsDownloading = false
 	e.LastError = err.Error()
 	e.ErrorCount++
 	now := time.Now()

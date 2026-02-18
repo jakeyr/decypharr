@@ -5,6 +5,11 @@ description: Decypharr File System details.
 
 DFS (Decypharr File System) is a custom VFS implementation optimized for streaming from Debrid and Usenet.
 
+## Windows Requirement
+
+If you run Decypharr on Windows and use `mount.type: "dfs"`, you must install **WinFsp** first.  
+Without WinFsp, DFS mounts will not start.
+
 ## Features
 
 - **Sequential Read Optimization**: Adaptive chunk sizing for streaming

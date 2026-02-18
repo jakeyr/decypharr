@@ -204,6 +204,25 @@ func (r *Repair) GetJob(id string) *storage.Job {
 	return job
 }
 
+// JobStats returns per-status job counts without loading full job data.
+func (r *Repair) JobStats() manager.RepairJobCounts {
+	counts := r.manager.Storage().CountRepairJobsByStatus()
+	var c manager.RepairJobCounts
+	for status, n := range counts {
+		switch status {
+		case storage.JobStarted, storage.JobProcessing:
+			c.Active += n
+		case storage.JobPending:
+			c.Pending += n
+		case storage.JobCompleted:
+			c.Completed += n
+		case storage.JobFailed, storage.JobCancelled:
+			c.Failed += n
+		}
+	}
+	return c
+}
+
 func (r *Repair) GetJobs() []*storage.Job {
 	jobs, err := r.manager.Storage().LoadAllRepairJobs()
 	if err != nil {
@@ -703,7 +722,6 @@ func (r *Repair) scanManagedEntries(ctx context.Context, scopeIDs []string) (map
 	g.SetLimit(max(1, min(r.workers, len(items))))
 
 	for _, item := range items {
-		item := item
 		g.Go(func() error {
 			itemBroken, itemDiscovered, itemStats := r.scanEntryItem(gctx, item)
 			mu.Lock()
@@ -1076,6 +1094,12 @@ func entryItemMatchesScope(item *storage.EntryItem, filters map[string]struct{})
 		}
 		if _, ok := filters[f.Name]; ok {
 			return true
+		}
+		// Supports precise file selection token from browse UI: "<infohash>:<filename>".
+		if f.InfoHash != "" && f.Name != "" {
+			if _, ok := filters[f.InfoHash+":"+f.Name]; ok {
+				return true
+			}
 		}
 	}
 	return false

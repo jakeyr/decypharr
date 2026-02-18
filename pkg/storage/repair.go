@@ -247,6 +247,22 @@ func (s *Storage) CountRepairJobs() (int, error) {
 	return s.repairJobs.Len(), nil
 }
 
+// CountRepairJobsByStatus counts repair jobs grouped by status.
+// Only unmarshals the minimal {Status} field from each job, avoiding full deserialization.
+func (s *Storage) CountRepairJobsByStatus() map[JobStatus]int {
+	counts := make(map[JobStatus]int)
+	_ = s.repairJobs.ForEach(func(_ string, value []byte) error {
+		var stub struct {
+			Status JobStatus `json:"status"`
+		}
+		if err := json.Unmarshal(value, &stub); err == nil && stub.Status != "" {
+			counts[stub.Status]++
+		}
+		return nil
+	})
+	return counts
+}
+
 func (s *Storage) PrepareRepairDataV2() error {
 	invalidJobIDs := make([]string, 0)
 	_ = s.repairJobs.ForEach(func(key string, value []byte) error {

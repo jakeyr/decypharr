@@ -10,8 +10,6 @@ import (
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/backend"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/backend/cgofuse"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs/backend/hanwen"
 	fuseconfig "github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs"
 )
@@ -51,51 +49,6 @@ func (r *RootNodeWrapper) GetManager() *manager.Manager {
 
 func (r *RootNodeWrapper) GetRootDir() interface{} {
 	return r.rootNode
-}
-
-// NewMount creates a new FUSE filesystem with the specified backend
-// backendType can be: "hanwen" (Linux), "anacrolix" (Linux, macOS with Fuse-T), "cgo" (future)
-func NewMount(mountName string, mgr *manager.Manager, backendType backend.Type) (*Mount, error) {
-	fuseConfig, err := fuseconfig.ParseFuseConfig(mountName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse FUSE config: %w", err)
-	}
-
-	vfsManager, err := vfs.NewManager(context.Background(), mgr, fuseConfig)
-	if err != nil {
-		return nil, fmt.Errorf("create vfs manager: %w", err)
-	}
-
-	log := logger.New("dfs").With().Str("mount", mountName).Str("backend", string(backendType)).Logger()
-
-	mount := &Mount{
-		vfs:         vfsManager,
-		config:      fuseConfig,
-		logger:      log,
-		manager:     mgr,
-		name:        mountName,
-		backendType: backendType,
-	}
-
-	// Create backend-specific root node
-	now := time.Now()
-	switch backendType {
-	case backend.Hanwen:
-		mount.rootNode = hanwen.NewDir(vfsManager, mgr, "", hanwen.LevelRoot, uint64(now.Unix()), fuseConfig, mount.logger)
-	case backend.Cgo:
-		mount.rootNode = cgofuse.NewFS(vfsManager, mgr, fuseConfig, mount.logger)
-	default:
-		return nil, fmt.Errorf("unknown backend type: %s", backendType)
-	}
-
-	// Create the backend
-	bck, err := backend.Create(backendType, fuseConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create backend: %w", err)
-	}
-	mount.backend = bck
-
-	return mount, nil
 }
 
 // Start starts the FUSE filesystem
@@ -177,24 +130,28 @@ func (m *Mount) Backend() backend.Type {
 	return m.backendType
 }
 
-// RefreshDirectory refreshes a directory in the filesystem
-func (m *Mount) RefreshDirectory(name string) {
-	switch m.backendType {
-	case backend.Hanwen:
-		if rootDir, ok := m.rootNode.(*hanwen.Dir); ok {
-			m.refreshDirectoryHanwen(rootDir, name)
-		}
-	case backend.Cgo:
-		// cgofuse doesn't need explicit refresh - entries are fetched dynamically
+// newMount creates a new Mount with the common setup (used by platform-specific NewMount)
+func newMount(mountName string, mgr *manager.Manager, backendType backend.Type) (*Mount, *vfs.Manager, *fuseconfig.FuseConfig, error) {
+	fuseConfig, err := fuseconfig.ParseFuseConfig(mountName)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to parse FUSE config: %w", err)
 	}
-}
 
-func (m *Mount) refreshDirectoryHanwen(rootDir *hanwen.Dir, name string) {
-	// Always refresh the root to pick up new top-level entries
-	rootDir.Refresh()
-
-	// If a specific directory name is provided, refresh its children too
-	if name != "" {
-		rootDir.RefreshChild(name)
+	vfsManager, err := vfs.NewManager(context.Background(), mgr, fuseConfig)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create vfs manager: %w", err)
 	}
+
+	log := logger.New("dfs").With().Str("mount", mountName).Str("backend", string(backendType)).Logger()
+
+	mount := &Mount{
+		vfs:         vfsManager,
+		config:      fuseConfig,
+		logger:      log,
+		manager:     mgr,
+		name:        mountName,
+		backendType: backendType,
+	}
+
+	return mount, vfsManager, fuseConfig, nil
 }

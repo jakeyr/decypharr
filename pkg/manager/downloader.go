@@ -3,27 +3,29 @@ package manager
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/cavaliergopher/grab/v3"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/pkg/notifications"
 	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/sourcegraph/conc/pool"
 )
 
 type Downloader struct {
-	manager     *Manager
-	strmURL     string
-	mountPath   string
-	dest        string
-	logger      zerolog.Logger
-	downloadSem chan struct{}
+	manager      *Manager
+	strmURL      string
+	mountPath    string
+	dest         string
+	logger       zerolog.Logger
+	maxDownloads int
 }
 
 // NewDownloadManager creates a new strm manager
@@ -44,7 +46,7 @@ func NewDownloadManager(manager *Manager) *Downloader {
 		mountPath:   cfg.Mount.MountPath,
 		logger:      manager.logger.With().Str("component", "downloader").Logger(),
 		dest:        cfg.DownloadFolder,
-		downloadSem: make(chan struct{}, cfg.MaxDownloads),
+		maxDownloads: cfg.MaxDownloads,
 	}
 }
 
@@ -218,7 +220,6 @@ func (d *Downloader) processDownload(entry *storage.Entry) error {
 
 // processTorrentDownload downloads files from debrid via HTTP
 func (d *Downloader) processTorrentDownload(entry *storage.Entry) error {
-	var wg sync.WaitGroup
 	files := entry.GetActiveFiles()
 	d.logger.Info().Msgf("Downloading %d files...", len(files))
 
@@ -227,83 +228,61 @@ func (d *Downloader) processTorrentDownload(entry *storage.Entry) error {
 		totalSize += file.Size
 	}
 	downloadedFolder := entry.SymlinkPath()
-	err := os.MkdirAll(downloadedFolder, os.ModePerm)
-	if err != nil {
+	if err := os.MkdirAll(downloadedFolder, os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create download directory: %s: %v", downloadedFolder, err)
 	}
-	entry.SizeDownloaded = 0 // Reset downloaded bytes
-	entry.Progress = 0       // Reset progress
+	entry.SizeDownloaded = 0
+	entry.IsDownloading = true
+	entry.Progress = 0
 
+	var progressMu sync.Mutex
 	progressCallback := func(downloaded int64, speed int64) {
-		var mu sync.Mutex
-		mu.Lock()
-		defer mu.Unlock()
+		progressMu.Lock()
+		defer progressMu.Unlock()
 
-		// Update total downloaded bytes
 		entry.SizeDownloaded += downloaded
 		entry.Speed = speed
-
-		// Calculate overall progress
 		if totalSize > 0 {
-			entry.Progress = float64(entry.SizeDownloaded) / float64(totalSize) * 100
+			entry.Progress = float64(entry.SizeDownloaded) / float64(totalSize)
 		}
-
-		// Update entry progress
-		entry.Progress = entry.Progress / 100.0
-		entry.Speed = speed
 		entry.UpdatedAt = time.Now()
 		_ = d.manager.queue.Update(entry)
 	}
 
-	errChan := make(chan error, len(files))
+	// Resolve download links before spawning goroutines
+	type downloadTask struct {
+		file *storage.File
+		link string
+	}
+	var tasks []downloadTask
 	for _, file := range files {
 		downloadLink, err := d.manager.linkService.GetLink(context.Background(), entry, file.Name)
 		if err != nil {
 			d.logger.Error().Msgf("Failed to get download link for %s: %v", file.Name, err)
 			continue
 		}
-		client := &grab.Client{
-			UserAgent: "Decypharr[QBitTorrent]",
-			HTTPClient: &http.Client{
-				Transport: &http.Transport{
-					Proxy: http.ProxyFromEnvironment,
-				},
-			},
-		}
-		wg.Add(1)
-		d.downloadSem <- struct{}{}
-		go func(file *storage.File) {
-			defer wg.Done()
-			defer func() { <-d.downloadSem }()
-			filename := file.Name
+		tasks = append(tasks, downloadTask{file: file, link: downloadLink.DownloadLink})
+	}
 
-			err := d.localDownloader(
-				client,
-				downloadLink.DownloadLink,
-				filepath.Join(downloadedFolder, filename),
-				file.ByteRange,
+	p := pool.New().WithErrors().WithFirstError().WithMaxGoroutines(d.maxDownloads)
+	for _, task := range tasks {
+		p.Go(func() error {
+			if err := d.localDownloader(
+				task.link,
+				filepath.Join(downloadedFolder, task.file.Name),
+				task.file.ByteRange,
 				progressCallback,
-			)
-
-			if err != nil {
-				d.logger.Error().Msgf("Failed to download %s: %v", filename, err)
-				errChan <- err
-			} else {
-				d.logger.Info().Msgf("Downloaded %s", filename)
+			); err != nil {
+				d.logger.Error().Msgf("Failed to download %s: %v", task.file.Name, err)
+				return err
 			}
-		}(file)
+			d.logger.Info().Msgf("Downloaded %s", task.file.Name)
+			return nil
+		})
 	}
-	wg.Wait()
 
-	close(errChan)
-	var errors []error
-	for err := range errChan {
-		if err != nil {
-			errors = append(errors, err)
-		}
-	}
-	if len(errors) > 0 {
-		return fmt.Errorf("errors occurred during download")
+	if err := p.Wait(); err != nil {
+		return fmt.Errorf("download failed: %w", err)
 	}
 	d.markAsCompleted(entry)
 	d.logger.Info().Msgf("Downloaded all files for %s", entry.Name)
@@ -324,7 +303,6 @@ func (d *Downloader) processUsenetDownload(entry *storage.Entry) error {
 		return fmt.Errorf("failed to create download directory: %s: %v", downloadedFolder, err)
 	}
 
-	// Calculate total size for progress tracking
 	totalSize := int64(0)
 	for _, file := range files {
 		totalSize += file.Size
@@ -335,67 +313,51 @@ func (d *Downloader) processUsenetDownload(entry *storage.Entry) error {
 	entry.IsDownloading = true
 	_ = d.manager.queue.Update(entry)
 
-	var wg sync.WaitGroup
 	var progressMu sync.Mutex
-	errChan := make(chan error, len(files))
+	// Track per-file progress so we can compute the global total across all files
+	fileProgress := make(map[string]int64)
 
+	p := pool.New().WithErrors().WithFirstError().WithMaxGoroutines(d.maxDownloads)
 	for _, file := range files {
-		wg.Add(1)
-		d.downloadSem <- struct{}{}
-		go func(file *storage.File) {
-			defer wg.Done()
-			defer func() { <-d.downloadSem }()
-
-			// Create destination file
+		p.Go(func() error {
 			destPath := filepath.Join(downloadedFolder, file.Name)
 			destFile, err := os.Create(destPath)
 			if err != nil {
-				errChan <- fmt.Errorf("failed to create file %s: %w", file.Name, err)
-				return
+				return fmt.Errorf("failed to create file %s: %w", file.Name, err)
 			}
 			defer destFile.Close()
 
-			ctx := d.manager.ctx
-
-			// Progress callback for this file
 			progressCallback := func(downloaded int64, speed int64) {
 				progressMu.Lock()
 				defer progressMu.Unlock()
 
-				entry.SizeDownloaded += downloaded - entry.SizeDownloaded
+				prev := fileProgress[file.Name]
+				fileProgress[file.Name] = downloaded
+				entry.SizeDownloaded += downloaded - prev
 				entry.Speed = speed
-
 				if totalSize > 0 {
 					entry.Progress = float64(entry.SizeDownloaded) / float64(totalSize)
 				}
-
 				entry.UpdatedAt = time.Now()
 				_ = d.manager.queue.Update(entry)
 			}
 
-			if err := d.manager.usenet.Download(ctx, entry.InfoHash, file.Name, destFile, progressCallback); err != nil {
-				_ = os.Remove(destPath) // Clean up partial file
-				errChan <- fmt.Errorf("failed to download %s: %w", file.Name, err)
-				return
+			if err := d.manager.usenet.Download(d.manager.ctx, entry.InfoHash, file.Name, destFile, progressCallback); err != nil {
+				_ = os.Remove(destPath)
+				return fmt.Errorf("failed to download %s: %w", file.Name, err)
 			}
 
 			d.logger.Info().Msgf("Downloaded NZB file: %s", file.Name)
-		}(file)
+			return nil
+		})
 	}
-	wg.Wait()
-	entry.IsDownloading = false
 
-	close(errChan)
-	var errors []error
-	for err := range errChan {
-		if err != nil {
-			errors = append(errors, err)
-		}
-	}
-	if len(errors) > 0 {
-		entry.MarkAsError(errors[0])
+	err := p.Wait()
+
+	if err != nil {
+		entry.MarkAsError(err)
 		_ = d.manager.queue.Update(entry)
-		return fmt.Errorf("errors occurred during NZB download: %d files failed", len(errors))
+		return fmt.Errorf("NZB download failed: %w", err)
 	}
 
 	d.markAsCompleted(entry)
@@ -479,47 +441,82 @@ func (d *Downloader) detectMultiSeason(torrent *storage.Entry) (bool, []SeasonIn
 	return true, seasons
 }
 
-// grabber downloads a file with progress callback
-func (d *Downloader) localDownloader(client *grab.Client, url, filename string, byterange *[2]int64, progressCallback func(int64, int64)) error {
-	req, err := grab.NewRequest(filename, url)
-	req.NoCreateDirectories = true
+// localDownloader downloads a file via HTTP with progress reporting
+func (d *Downloader) localDownloader(downloadURL, filename string, byterange *[2]int64, progressCallback func(int64, int64)) error {
+	req, err := http.NewRequestWithContext(d.manager.ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return err
 	}
+	req.Header.Set("User-Agent", "Decypharr[QBitTorrent]")
 
 	// Set byte range if specified
 	if byterange != nil {
-		byterangeStr := fmt.Sprintf("%d-%d", byterange[0], byterange[1])
-		req.HTTPRequest.Header.Set("Range", "bytes="+byterangeStr)
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", byterange[0], byterange[1]))
 	}
 
-	resp := client.Do(req)
+	resp, err := d.manager.streamClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-	t := time.NewTicker(time.Second * 2)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return fmt.Errorf("unexpected status %d for %s", resp.StatusCode, downloadURL)
+	}
+
+	f, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// Use a progress-tracking writer that reports every 2 seconds
+	var downloaded atomic.Int64
+	startTime := time.Now()
+	var lastReported int64
+
+	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 
-	var lastReported int64
-Loop:
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(f, io.TeeReader(resp.Body, &countWriter{n: &downloaded}))
+		done <- err
+	}()
+
 	for {
 		select {
 		case <-t.C:
-			current := resp.BytesComplete()
-			speed := int64(resp.BytesPerSecond())
-			if current != lastReported {
-				if progressCallback != nil {
-					progressCallback(current-lastReported, speed)
-				}
+			current := downloaded.Load()
+			elapsed := time.Since(startTime).Seconds()
+			speed := int64(0)
+			if elapsed > 0 {
+				speed = int64(float64(current) / elapsed)
+			}
+			if current != lastReported && progressCallback != nil {
+				progressCallback(current-lastReported, speed)
 				lastReported = current
 			}
-		case <-resp.Done:
-			break Loop
+		case err := <-done:
+			// Report final bytes
+			if progressCallback != nil {
+				final := downloaded.Load()
+				if final != lastReported {
+					progressCallback(final-lastReported, 0)
+				}
+			}
+			return err
 		}
 	}
+}
 
-	// Report final bytes
-	if progressCallback != nil {
-		progressCallback(resp.BytesComplete()-lastReported, 0)
-	}
+// countWriter is a minimal io.Writer that atomically counts bytes written
+type countWriter struct {
+	n *atomic.Int64
+}
 
-	return resp.Err()
+func (cw *countWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	cw.n.Add(int64(n))
+	return n, nil
 }

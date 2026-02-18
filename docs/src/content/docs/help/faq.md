@@ -127,6 +127,7 @@ If RD has <5 free slots, Decypharr uses All Debrid.
 | API/WebDAV only | **None** |
 
 **DFS** is recommended for most users.
+On Windows, DFS mounting requires WinFsp to be installed.
 
 ### How do I fix "Permission Denied" on mount?
 

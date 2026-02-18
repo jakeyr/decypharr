@@ -95,8 +95,7 @@ func (m *Manager) ReleaseFile(info *manager.FileInfo) {
 		if entry.refCount.Add(-1) <= 0 {
 			m.files.Delete(key)
 			m.activeFiles.Add(-1)
-			// Note: Don't stop downloaders immediately - let idle timeout handle it.
-			// Immediate stop can cause hangs if downloads are in progress.
+			// Downloaders are stopped in CacheItem.Release() when opens reaches 0.
 		}
 	}
 }
@@ -137,11 +136,6 @@ func (m *Manager) GetStats() map[string]interface{} {
 		for k, v := range m.cache.GetStats() {
 			stats["cache_"+k] = v
 		}
-	}
-
-	// Add VFS streaming stats
-	for k, v := range GlobalVFSStats.ToMap() {
-		stats["vfs_"+k] = v
 	}
 
 	return stats

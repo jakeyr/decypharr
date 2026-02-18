@@ -5,6 +5,7 @@ import (
 	json "github.com/bytedance/sonic"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -39,6 +40,67 @@ type BrowseResponse struct {
 	ParentDir  string        `json:"parent_dir,omitempty"`
 }
 
+func getBrowseSortParams(r *http.Request) (string, string) {
+	sortBy := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort_by")))
+	sortOrder := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort_order")))
+
+	switch sortBy {
+	case "name", "size", "mod_time", "active_debrid":
+	default:
+		sortBy = "name"
+	}
+
+	if sortOrder != "desc" {
+		sortOrder = "asc"
+	}
+
+	return sortBy, sortOrder
+}
+
+func compareInt64(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func sortBrowseEntries(entries []BrowseEntry, sortBy, sortOrder string) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		// Keep folders above files regardless of sort direction.
+		if entries[i].IsDir != entries[j].IsDir {
+			return entries[i].IsDir && !entries[j].IsDir
+		}
+
+		cmp := 0
+		switch sortBy {
+		case "size":
+			cmp = compareInt64(entries[i].Size, entries[j].Size)
+		case "mod_time":
+			cmp = strings.Compare(entries[i].ModTime, entries[j].ModTime)
+		case "active_debrid":
+			cmp = strings.Compare(strings.ToLower(entries[i].ActiveDebrid), strings.ToLower(entries[j].ActiveDebrid))
+		default:
+			cmp = strings.Compare(strings.ToLower(entries[i].Name), strings.ToLower(entries[j].Name))
+		}
+
+		if cmp == 0 {
+			cmp = strings.Compare(strings.ToLower(entries[i].Name), strings.ToLower(entries[j].Name))
+		}
+		if cmp == 0 {
+			cmp = strings.Compare(entries[i].Path, entries[j].Path)
+		}
+
+		if sortOrder == "desc" {
+			cmp = -cmp
+		}
+		return cmp < 0
+	})
+}
+
 // handleBrowseMount returns subdirectories under a mount (__all__, __bad__, etc.)
 func (s *Server) handleBrowseMount(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
@@ -50,6 +112,7 @@ func (s *Server) handleBrowseMount(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > 100 {
 		limit = 50
 	}
+	sortBy, sortOrder := getBrowseSortParams(r)
 
 	children := s.manager.GetEntries()
 
@@ -65,6 +128,7 @@ func (s *Server) handleBrowseMount(w http.ResponseWriter, r *http.Request) {
 			ActiveDebrid: child.ActiveDebrid(),
 		})
 	}
+	sortBrowseEntries(entries, sortBy, sortOrder)
 
 	// Apply pagination
 	total := len(entries)
@@ -105,6 +169,7 @@ func (s *Server) handleBrowseGroup(w http.ResponseWriter, r *http.Request) {
 	if limit < 1 || limit > 100 {
 		limit = 50
 	}
+	sortBy, sortOrder := getBrowseSortParams(r)
 
 	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("search")))
 
@@ -139,6 +204,7 @@ func (s *Server) handleBrowseGroup(w http.ResponseWriter, r *http.Request) {
 			ActiveDebrid: child.ActiveDebrid(),
 		})
 	}
+	sortBrowseEntries(entries, sortBy, sortOrder)
 
 	// Apply pagination
 	total := len(entries)
@@ -181,6 +247,7 @@ func (s *Server) handleBrowseTorrentFiles(w http.ResponseWriter, r *http.Request
 	if limit < 1 || limit > 100 {
 		limit = 50
 	}
+	sortBy, sortOrder := getBrowseSortParams(r)
 
 	search := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("search")))
 
@@ -207,9 +274,11 @@ func (s *Server) handleBrowseTorrentFiles(w http.ResponseWriter, r *http.Request
 			Size:         child.Size(),
 			ModTime:      child.ModTime().Format("2006-01-02 15:04:05"),
 			IsDir:        child.IsDir(),
+			InfoHash:     child.InfoHash(),
 			ActiveDebrid: child.ActiveDebrid(),
 		})
 	}
+	sortBrowseEntries(entries, sortBy, sortOrder)
 
 	// Apply pagination
 	total := len(entries)
@@ -290,78 +359,6 @@ func (s *Server) handleBatchDeleteBrowseTorrents(w http.ResponseWriter, r *http.
 		"success": true,
 		"message": "Torrents deleted successfully",
 		"count":   len(req.IDs),
-	}, http.StatusOK)
-}
-
-// handleMoveTorrent initiates a torrent move operation
-func (s *Server) handleMoveTorrent(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if id == "" {
-		http.Error(w, "Torrent ID is required", http.StatusBadRequest)
-		return
-	}
-
-	var req struct {
-		TargetDebrid string `json:"target_debrid"`
-		KeepSource   bool   `json:"keep_source"`
-		WaitComplete bool   `json:"wait_complete"`
-	}
-
-	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if req.TargetDebrid == "" {
-		http.Error(w, "Target debrid is required", http.StatusBadRequest)
-		return
-	}
-
-	job, err := s.manager.SwitchTorrent(r.Context(), id, req.TargetDebrid, req.KeepSource, req.WaitComplete)
-	if err != nil {
-		s.logger.Error().Err(err).Str("id", id).Msg("Failed to move torrent")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	utils.JSONResponse(w, map[string]interface{}{
-		"success": true,
-		"job":     job,
-		"message": "Migration started successfully",
-	}, http.StatusOK)
-}
-
-// handleGetTorrentInfo returns detailed torrent info for context menu
-func (s *Server) handleGetTorrentInfo(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if id == "" {
-		http.Error(w, "Torrent ID is required", http.StatusBadRequest)
-		return
-	}
-
-	torrent, err := s.manager.GetEntry(id)
-	if err != nil {
-		s.logger.Error().Err(err).Str("id", id).Msg("Failed to get torrent")
-		http.Error(w, "Torrent not found", http.StatusNotFound)
-		return
-	}
-
-	// GetReader available debrids for move operation
-	debrids := make([]string, 0)
-	for debridName := range torrent.Providers {
-		if debridName != torrent.ActiveProvider {
-			debrids = append(debrids, debridName)
-		}
-	}
-
-	utils.JSONResponse(w, map[string]interface{}{
-		"info_hash":         torrent.InfoHash,
-		"name":              torrent.Name,
-		"size":              torrent.Size,
-		"active_debrid":     torrent.ActiveProvider,
-		"status":            torrent.Status,
-		"available_debrids": debrids,
-		"placements":        torrent.Providers,
 	}, http.StatusOK)
 }
 

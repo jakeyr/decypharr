@@ -85,8 +85,8 @@ func Register(backendType Type, factory Factory) {
 func Create(backendType Type, config *config.FuseConfig) (Backend, error) {
 	factory, ok := factories[backendType]
 	if !ok {
-		// Default to hanwen if not found
-		factory = factories[Hanwen]
+		// Default to platform default if not found
+		factory = factories[DefaultBackend()]
 	}
 	return factory(config)
 }

@@ -82,8 +82,15 @@ func (m *Manager) processQueuedEntries() {
 	}
 	for _, entry := range queueEntries {
 		// Parse only active downloading torrents
+		if entry.State != storage.EntryStateDownloading {
+			continue
+		}
+		// Skip entries that are actively being downloading
+		if entry.IsDownloading {
+			continue
+		}
 		if entry.IsTorrent() {
-			if entry.ActiveProvider != "" && entry.Status == debridTypes.TorrentStatusDownloading {
+			if entry.ActiveProvider != "" {
 				go m.processQueuedTorrent(entry)
 			}
 		} else if entry.IsNZB() {
@@ -244,6 +251,10 @@ func (m *Manager) processAction(entry *storage.Entry) {
 	}
 	err := m.downloader.download(entry)
 	if err != nil {
+		m.logger.Error().
+			Err(err).
+			Str("name", entry.Name).
+			Msg("Error running post-download action")
 		return
 	}
 }

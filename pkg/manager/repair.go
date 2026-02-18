@@ -5,11 +5,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
+
+// RepairJobCounts holds per-status counts of repair jobs.
+type RepairJobCounts struct {
+	Active    int `json:"active_jobs"`
+	Pending   int `json:"pending_jobs"`
+	Completed int `json:"completed_jobs"`
+	Failed    int `json:"failed_jobs"`
+}
 
 type RepairManager interface {
 	Run(ctx context.Context)
@@ -18,6 +28,7 @@ type RepairManager interface {
 	ProcessJob(id string) error
 	DeleteJobs(ids []string)
 	GetJobs() []*storage.Job
+	JobStats() RepairJobCounts
 	Stop()
 }
 
@@ -191,7 +202,43 @@ func (m *Manager) ProbeEntryFiles(ctx context.Context, item *storage.EntryItem, 
 		}
 	}
 
-	return flattenProbeResults(results, files)
+	final := flattenProbeResults(results, files)
+
+	// Time to attempt a repair for torrent files
+	brokenByHash := make(map[string]struct{})
+	for _, result := range final {
+		if result.Protocol == config.ProtocolTorrent && result.Status == FileProbeBroken {
+			brokenByHash[result.InfoHash] = struct{}{}
+		}
+	}
+
+	fixedHashes := xsync.NewMap[string, struct{}]()
+	var wg sync.WaitGroup
+	for infoHash := range brokenByHash {
+		wg.Add(1)
+		go func(infoHash string) {
+			defer wg.Done()
+			entry, err := m.GetEntry(infoHash)
+			if err != nil {
+				return
+			}
+			if err := m.ReinsertEntry(context.Background(), entry); err != nil {
+				return
+			}
+			fixedHashes.Store(infoHash, struct{}{})
+		}(infoHash)
+	}
+	wg.Wait()
+
+	// Update results for successfully repaired torrents
+	for i, result := range final {
+		if _, fixed := fixedHashes.Load(result.InfoHash); fixed && result.Status == FileProbeBroken {
+			final[i].Status = FileProbeHealthy
+			final[i].Reason = "repaired"
+		}
+	}
+
+	return final
 }
 
 func flattenProbeResults(results map[string]FileProbeResult, files map[string]*storage.File) []FileProbeResult {

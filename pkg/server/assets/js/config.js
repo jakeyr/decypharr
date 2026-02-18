@@ -109,7 +109,8 @@ class ConfigManager {
             'min_file_size', 'max_file_size', 'remove_stalled_after',
             'nzb_user_agent', 'download_folder', 'refresh_interval',
             'max_downloads', 'skip_pre_cache', 'always_rm_tracker_urls',
-            'folder_naming', 'refresh_dirs'
+            'folder_naming', 'refresh_dirs',
+            'default_download_action', 'download_connections'
         ];
 
         fields.forEach(field => {
@@ -123,6 +124,25 @@ class ConfigManager {
         if (config.allowed_file_types && Array.isArray(config.allowed_file_types)) {
             document.querySelector('[name="allowed_file_types"]').value = config.allowed_file_types.join(', ');
         }
+
+        // Set up downloader section toggle
+        this.setupDownloaderToggle();
+    }
+
+    setupDownloaderToggle() {
+        const actionSelect = document.getElementById('default_download_action');
+        if (!actionSelect) return;
+
+        const toggleDownloaderOptions = () => {
+            const isDownload = actionSelect.value === 'download';
+            document.querySelectorAll('.downloader-option').forEach(el => {
+                el.disabled = !isDownload;
+                el.closest('div').classList.toggle('opacity-50', !isDownload);
+            });
+        };
+
+        actionSelect.addEventListener('change', toggleDownloaderOptions);
+        toggleDownloaderOptions();
     }
 
     populateRepairSettings(repairConfig) {
@@ -1092,7 +1112,9 @@ class ConfigManager {
             nzb_user_agent: document.querySelector('[name="nzb_user_agent"]').value,
             download_folder: document.querySelector('[name="download_folder"]').value,
             refresh_interval: document.querySelector('[name="refresh_interval"]').value || "30s",
+            default_download_action: document.querySelector('[name="default_download_action"]')?.value || "symlink",
             max_downloads: parseInt(document.querySelector('[name="max_downloads"]').value) || 0,
+            download_connections: parseInt(document.querySelector('[name="download_connections"]').value) || 16,
             skip_pre_cache: document.querySelector('[name="skip_pre_cache"]').checked,
             always_rm_tracker_urls: document.querySelector('[name="always_rm_tracker_urls"]').checked,
             folder_naming: document.querySelector('[name="folder_naming"]')?.value || "",

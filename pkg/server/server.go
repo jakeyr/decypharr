@@ -22,6 +22,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/server/qbit"
 	"github.com/sirrobot01/decypharr/pkg/server/sabnzbd"
 	"github.com/sirrobot01/decypharr/pkg/server/webdav"
+	"github.com/sirrobot01/decypharr/pkg/stats"
 )
 
 //go:embed templates/*
@@ -68,6 +69,7 @@ type Server struct {
 	router       *chi.Mux
 	logger       zerolog.Logger
 	manager      *manager.Manager
+	stats        *stats.Collector
 	cookie       *sessions.CookieStore
 	templates    *template.Template
 	nzbUserAgent string
@@ -105,9 +107,12 @@ func New(mgr *manager.Manager) *Server {
 		HttpOnly: false,
 	}
 
+	statsCollector := stats.New(mgr)
+
 	s := &Server{
 		logger:    l,
 		manager:   mgr,
+		stats:     statsCollector,
 		cookie:    cookieStore,
 		templates: templates,
 		urlBase:   cfg.URLBase,
@@ -134,7 +139,7 @@ func New(mgr *manager.Manager) *Server {
 		r.Get("/logs", s.getLogs) // deprecated, use /debug/logs
 
 		r.Route("/debug", func(r chi.Router) {
-			r.Get("/stats", s.handleStats)
+			r.Get("/stats", s.stats.Handler())
 			r.Post("/speedtest", s.handleSpeedTest)
 			r.Get("/logs", s.getLogs)
 			r.Get("/logs/rclone", s.getRcloneLogs)
@@ -165,6 +170,9 @@ func (s *Server) Restart() {
 
 func (s *Server) Start(ctx context.Context) error {
 	cfg := config.Get()
+
+	// Start background stats collector
+	s.stats.Start(ctx)
 
 	addr := fmt.Sprintf("%s:%s", cfg.BindAddress, cfg.Port)
 	s.logger.Info().Msgf("Starting server on %s%s", addr, cfg.URLBase)

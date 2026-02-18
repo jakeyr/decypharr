@@ -8,6 +8,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"syscall"
 
@@ -26,12 +27,24 @@ func main() {
 
 	var configPath string
 	var pprofAddr string
-	flag.StringVar(&configPath, "config", "/data", "path to the data folder")
+
+	// Create a default config directory if it doesn't exist
+	flag.StringVar(&configPath, "config", "", "path to the data folder")
 	flag.StringVar(&pprofAddr, "pprof", ":6060", "pprof server address (set to empty to disable)")
 	flag.Parse()
 
 	// get enable pprof flag from environment variable if not set via flag
 	enablePprof := os.Getenv("ENABLE_PPROF") != ""
+
+	if configPath == "" {
+		defaultDir, err := os.UserHomeDir()
+		if err != nil {
+			// If we can't get the user home directory, fallback to current directory
+			defaultDir = "."
+		}
+		defaultConfigDir := filepath.Join(defaultDir, ".decypharr")
+		configPath = defaultConfigDir
+	}
 
 	config.SetConfigPath(configPath)
 	config.Get()

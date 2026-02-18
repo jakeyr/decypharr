@@ -51,9 +51,9 @@
                         <i class="bi bi-download"></i>
                         <span class="hidden sm:inline">Download</span>
                     </button>
-                    <button class="btn btn-sm btn-outline" id="bulkMoveBtn">
-                        <i class="bi bi-arrow-left-right"></i>
-                        <span class="hidden sm:inline">Move</span>
+                    <button class="btn btn-sm btn-secondary" id="bulkRepairBtn">
+                        <i class="bi bi-wrench-adjustable"></i>
+                        <span class="hidden sm:inline">Repair</span>
                     </button>
                     <button class="btn btn-sm btn-error" id="bulkDeleteBtn">
                         <i class="bi bi-trash"></i>
@@ -82,16 +82,28 @@
                             <i class="bi bi-file-earmark"></i>
                         </th>
                         <th class="font-semibold">
-                            <i class="bi bi-file-text mr-2"></i>Name
+                            <button type="button" class="inline-flex items-center gap-1 hover:text-primary transition-colors" data-sort-key="name">
+                                <i class="bi bi-file-text"></i>Name
+                                <i class="bi bi-arrow-down-up text-xs" id="sortIndicator-name"></i>
+                            </button>
                         </th>
                         <th class="font-semibold">
-                            <i class="bi bi-hdd mr-2"></i>Size
+                            <button type="button" class="inline-flex items-center gap-1 hover:text-primary transition-colors" data-sort-key="size">
+                                <i class="bi bi-hdd"></i>Size
+                                <i class="bi bi-arrow-down-up text-xs" id="sortIndicator-size"></i>
+                            </button>
                         </th>
                         <th class="font-semibold">
-                            <i class="bi bi-calendar mr-2"></i>Modified
+                            <button type="button" class="inline-flex items-center gap-1 hover:text-primary transition-colors" data-sort-key="mod_time">
+                                <i class="bi bi-calendar"></i>Modified
+                                <i class="bi bi-arrow-down-up text-xs" id="sortIndicator-mod_time"></i>
+                            </button>
                         </th>
                         <th class="font-semibold">
-                            <i class="bi bi-cloud mr-2"></i>Selected Provider
+                            <button type="button" class="inline-flex items-center gap-1 hover:text-primary transition-colors" data-sort-key="active_debrid">
+                                <i class="bi bi-cloud"></i>Selected Provider
+                                <i class="bi bi-arrow-down-up text-xs" id="sortIndicator-active_debrid"></i>
+                            </button>
                         </th>
                         <th class="font-semibold w-32">Actions</th>
                     </tr>
@@ -122,51 +134,35 @@
     </div>
 </div>
 
-<!-- Move Torrent Modal -->
-<dialog id="moveTorrentModal" class="modal">
+<!-- Bulk Repair Modal -->
+<dialog id="repairSelectionModal" class="modal">
     <div class="modal-box">
         <h3 class="font-bold text-lg mb-4">
-            <i class="bi bi-arrow-left-right text-primary"></i>
-            Move Torrent to Debrid
+            <i class="bi bi-wrench-adjustable text-secondary"></i>
+            Start Repair Scan
         </h3>
         <form method="dialog">
             <button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button>
         </form>
 
         <div class="space-y-4">
-            <div>
-                <label class="label">
-                    <span class="label-text font-semibold">Torrent</span>
-                </label>
-                <div class="bg-base-200 p-3 rounded-lg">
-                    <p class="font-medium" id="moveTorrentName">Movie.2024.mkv</p>
-                    <p class="text-sm text-base-content/70 mt-1">
-                        Current: <span class="badge badge-sm badge-primary" id="moveCurrentDebrid">realdebrid</span>
-                    </p>
-                </div>
+            <div class="bg-base-200 p-3 rounded-lg">
+                <p class="font-medium">
+                    <span id="repairSelectionCount">0</span> selected item(s)
+                </p>
+                <p class="text-xs text-base-content/70 mt-1">
+                    Selected entries/files will be used as managed-entry repair filters.
+                </p>
             </div>
 
             <div>
-                <label class="label">
-                    <span class="label-text font-semibold">Target Debrid Provider</span>
+                <label class="label" for="repairModeSelect">
+                    <span class="label-text font-semibold">Repair Mode</span>
                 </label>
-                <select class="select w-full" id="moveTargetDebrid">
-                    <option disabled selected>Select debrid provider</option>
+                <select class="select w-full" id="repairModeSelect">
+                    <option value="detect_only" selected>Detect Only</option>
+                    <option value="detect_and_repair">Detect And Repair</option>
                 </select>
-            </div>
-
-            <div class="fieldset">
-                <label class="label cursor-pointer">
-                    <span class="label-text">Keep on source debrid</span>
-                    <input type="checkbox" class="toggle toggle-primary" id="moveKeepSource" checked>
-                </label>
-            </div>
-
-            <div class="fieldset">
-                <label class="label cursor-pointer">
-                    <span class="label-text">Wait for completion</span>
-                    <input type="checkbox" class="toggle toggle-primary" id="moveWaitComplete" checked>
-                </label>
             </div>
         </div>
 
@@ -174,9 +170,9 @@
             <form method="dialog">
                 <button class="btn btn-ghost">Cancel</button>
             </form>
-            <button class="btn btn-primary" id="confirmMoveBtn">
-                <i class="bi bi-arrow-left-right"></i>
-                Start Migration
+            <button class="btn btn-secondary" id="confirmRepairBtn">
+                <i class="bi bi-play-circle"></i>
+                Start Repair
             </button>
         </div>
     </div>
@@ -186,7 +182,6 @@
 <div id="contextMenu" class="dropdown dropdown-open hidden absolute z-50">
     <div class="menu bg-base-200 rounded-box shadow-lg w-52 p-2">
         <li id="contextDownload" class="hidden"><a><i class="bi bi-download"></i> Download</a></li>
-        <li id="contextMove" class="hidden"><a><i class="bi bi-arrow-left-right"></i> Switch Provider</a></li>
         <li id="contextDelete" class="hidden"><a class="text-error"><i class="bi bi-trash"></i> Delete Entry</a></li>
     </div>
 </div>

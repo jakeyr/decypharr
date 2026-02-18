@@ -54,6 +54,8 @@ func (b *Backend) Mount(ctx context.Context, root backend.RootNode) error {
 
 	// Create filesystem host
 	b.host = fuse.NewFileSystemHost(fs)
+	b.host.SetCapReaddirPlus(true)      // Enable ReaddirPlus (used by WinFsp on Windows)
+	b.host.SetCapCaseInsensitive(true)   // Windows is case-insensitive
 
 	// Build mount options
 	var options []string
@@ -65,8 +67,9 @@ func (b *Backend) Mount(ctx context.Context, root backend.RootNode) error {
 	switch runtime.GOOS {
 	case "windows":
 		// WinFsp options
+		options = append(options, "-o", "uid=-1,gid=-1")
 		options = append(options, "-o", "volname=DFS")
-		options = append(options, "-o", "FileSystemName=DFS")
+		options = append(options, "--FileSystemName=DFS")
 		// Allow other users to access
 		if b.config.AllowOther {
 			options = append(options, "-o", "uid=-1,gid=-1")
@@ -124,10 +127,7 @@ func (b *Backend) Unmount(ctx context.Context) error {
 	b.logger.Info().Msg("Unmounting cgofuse backend")
 
 	if b.host != nil {
-		ok := b.host.Unmount()
-		if !ok {
-			b.logger.Warn().Msg("cgofuse unmount returned false")
-		}
+		_ = b.host.Unmount()
 	}
 
 	// Close VFS manager

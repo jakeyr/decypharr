@@ -37,7 +37,6 @@ func (s *Service) initNotifiers() {
 	s.notifiers = make([]Notifier, 0)
 
 	if !s.config.Enabled {
-		s.logger.Debug().Msg("Notifications disabled")
 		return
 	}
 
@@ -90,7 +89,7 @@ func (s *Service) IsEnabled() bool {
 	return s.config.Enabled && len(s.notifiers) > 0
 }
 
-// Reload reinitializes notifiers based on current config
+// Reload reinitialized notifiers based on current config
 func (s *Service) Reload(cfg *config.Notifications) {
 	s.config = cfg
 	s.initNotifiers()

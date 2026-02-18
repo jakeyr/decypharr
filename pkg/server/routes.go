@@ -71,8 +71,6 @@ func (s *Server) WebRoutes() http.Handler {
 				// Torrent operations
 				r.Delete("/torrents/{id}", s.handleDeleteBrowseTorrent)
 				r.Delete("/torrents/batch", s.handleBatchDeleteBrowseTorrents)
-				r.Post("/torrents/{id}/move", s.handleMoveTorrent)
-				r.Get("/torrents/{id}/info", s.handleGetTorrentInfo)
 
 				// File download
 				r.Get("/download/{torrent}/{file}", s.handleDownloadFile)

@@ -96,9 +96,11 @@ func (f *FS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 		stat.Uid = f.config.UID
 		stat.Gid = f.config.GID
 		now := time.Now()
-		stat.Atim = fuse.NewTimespec(now)
-		stat.Mtim = fuse.NewTimespec(now)
-		stat.Ctim = fuse.NewTimespec(now)
+		t := fuse.NewTimespec(now)
+		stat.Atim = t
+		stat.Mtim = t
+		stat.Ctim = t
+		stat.Birthtim = t
 		return 0
 	}
 
@@ -120,10 +122,12 @@ func (f *FS) Getattr(path string, stat *fuse.Stat_t, fh uint64) int {
 	stat.Uid = f.config.UID
 	stat.Gid = f.config.GID
 	modTime := info.ModTime()
-	stat.Atim = fuse.NewTimespec(modTime)
-	stat.Mtim = fuse.NewTimespec(modTime)
-	stat.Ctim = fuse.NewTimespec(modTime)
-	stat.Blksize = 4096
+	t := fuse.NewTimespec(modTime)
+	stat.Atim = t
+	stat.Mtim = t
+	stat.Ctim = t
+	stat.Birthtim = t
+	stat.Blksize = 512
 	stat.Blocks = (stat.Size + 511) / 512
 
 	return 0
@@ -184,13 +188,15 @@ func (f *FS) entryStat(info *manager.FileInfo) *fuse.Stat_t {
 	stat := &fuse.Stat_t{
 		Uid:     f.config.UID,
 		Gid:     f.config.GID,
-		Blksize: 4096,
+		Blksize: 512,
 	}
 
 	modTime := info.ModTime()
-	stat.Atim = fuse.NewTimespec(modTime)
-	stat.Mtim = fuse.NewTimespec(modTime)
-	stat.Ctim = fuse.NewTimespec(modTime)
+	t := fuse.NewTimespec(modTime)
+	stat.Atim = t
+	stat.Mtim = t
+	stat.Ctim = t
+	stat.Birthtim = t
 
 	if info.IsDir() {
 		stat.Mode = fuse.S_IFDIR | 0755
@@ -205,39 +211,57 @@ func (f *FS) entryStat(info *manager.FileInfo) *fuse.Stat_t {
 	return stat
 }
 
-// Open opens a file
-func (f *FS) Open(path string, flags int) (int, uint64) {
+// CreateEx is required by fuse.FileSystemOpenEx but this is a read-only filesystem
+func (f *FS) CreateEx(path string, mode uint32, fi *fuse.FileInfo_t) int {
+	return -fuse.EACCES
+}
+
+// OpenEx opens a file with extended info (implements fuse.FileSystemOpenEx)
+// This allows setting DirectIO which is critical for media playback on Windows
+func (f *FS) OpenEx(path string, fi *fuse.FileInfo_t) int {
+	fi.Fh = ^uint64(0)
+
 	// Check if read-only access
-	if flags&(os.O_WRONLY|os.O_RDWR|os.O_APPEND|os.O_CREATE|os.O_TRUNC) != 0 {
-		return -fuse.EACCES, ^uint64(0)
+	if fi.Flags&(os.O_WRONLY|os.O_RDWR|os.O_APPEND|os.O_CREATE|os.O_TRUNC) != 0 {
+		return -fuse.EACCES
 	}
 
 	info, err := f.getFileInfo(path)
 	if err != nil {
-		return -fuse.ENOENT, ^uint64(0)
+		return -fuse.ENOENT
 	}
 
 	if info.IsDir() {
-		return -fuse.EISDIR, ^uint64(0)
+		return -fuse.EISDIR
 	}
 
-	var (
-		reader *vfs.StreamingFile
-	)
+	var reader *vfs.StreamingFile
 
 	// get reader/stream for remote files
 	if info.IsRemote() {
 		stream, err := f.vfs.GetFile(info)
 		if err != nil {
 			f.logger.Error().Err(err).Str("path", path).Msg("Failed to get DFS stream file")
-			return -fuse.EIO, ^uint64(0)
+			return -fuse.EIO
 		}
 		reader = stream
 	}
 
+	// Enable DirectIO to bypass the Windows kernel cache manager.
+	// Without this, WinFsp routes reads through cached I/O which expects
+	// aligned reads and pre-fetches data in patterns that break streaming.
+	fi.DirectIo = true
+
 	// Create handle (reader/stream may be nil for non-remote files)
-	fh := f.handles.Create(info, reader)
-	return 0, fh
+	fi.Fh = f.handles.Create(info, reader)
+	return 0
+}
+
+// Open opens a file (fallback for non-OpenEx path)
+func (f *FS) Open(path string, flags int) (int, uint64) {
+	fi := fuse.FileInfo_t{Flags: flags}
+	errc := f.OpenEx(path, &fi)
+	return errc, fi.Fh
 }
 
 // Read reads from a file
@@ -317,12 +341,20 @@ func (f *FS) Releasedir(path string, fh uint64) int {
 	return 0
 }
 
+// Flush is called when a file descriptor is closed
+func (f *FS) Flush(path string, fh uint64) int {
+	return 0
+}
+
+// Fsync synchronizes file contents
+func (f *FS) Fsync(path string, datasync bool, fh uint64) int {
+	return 0
+}
+
 // Access checks file access permissions
+// This is a no-op - returning EACCES for write checks causes Windows media
+// players to refuse to open files even for reading
 func (f *FS) Access(path string, mask uint32) int {
-	// Always allow read access
-	if mask&fuse.W_OK != 0 {
-		return -fuse.EACCES
-	}
 	return 0
 }
 
@@ -454,3 +486,9 @@ func (h *HandleManager) CloseAll(cleanup func(*FileHandle)) {
 		return true
 	})
 }
+
+// Interface assertions
+var (
+	_ fuse.FileSystemInterface = (*FS)(nil)
+	_ fuse.FileSystemOpenEx    = (*FS)(nil)
+)

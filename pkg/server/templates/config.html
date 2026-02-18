@@ -166,9 +166,10 @@
                             <div class="divider">
                                 <span class="text-lg font-semibold">Qbittorent & SABnzbd Settings</span>
                             </div>
+
                             <div class="space-y-6">
                                 <div class="space-y-4">
-                                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
                                         <div>
                                             <label class="label" for="download_folder">
                                                 <span class="font-medium">Download Folder</span>
@@ -179,18 +180,6 @@
                                                 stored(this is your qbittorent download folder)</span>
                                         </div>
                                         <div>
-                                            <label class="label" for="default_download_action">
-                                                <span class="font-medium">Default Download Action</span>
-                                            </label>
-                                            <select class="select w-full" name="default_download_action"
-                                                id="default_download_action">
-                                                <option value="symlink">Create Symlink</option>
-                                                <option value="strm">Create STRM Files</option>
-                                                <option value="download">Download Files</option>
-                                                <option value="none">No Action</option>
-                                            </select>
-                                        </div>
-                                        <div>
                                             <label class="label" for="refresh_interval">
                                                 <span class="font-medium">Refresh Interval</span>
                                             </label>
@@ -198,15 +187,6 @@
                                                 id="refresh_interval" placeholder="30s">
                                             <span class="text-sm opacity-70">How often to refresh torrent status (e.g.,
                                                 30s, 1m)</span>
-                                        </div>
-                                        <div>
-                                            <label class="label" for="max_downloads">
-                                                <span class="font-medium">Maximum Downloads</span>
-                                            </label>
-                                            <input type="number" class="input w-full" name="max_downloads"
-                                                id="max_downloads" min="0">
-                                            <span class="text-sm opacity-70">Maximum simultaneous downloads (0 =
-                                                unlimited. This is used when not symlink-ing)</span>
                                         </div>
                                         <div>
                                             <label class="label" for="removeStalledAfter">
@@ -251,11 +231,57 @@
                                             </label>
                                         </div>
                                     </div>
-                                    <h3 class="text-xl font-bold flex items-center mt-8 mb-4">
-                                        <i class="bi bi-hdd-network mr-3 text-info"></i>WebDAV & External Rclone
-                                        Settings
-                                    </h3>
+                                </div>
+                            </div>
 
+                            <div class="space-y-6">
+                                <div class="space-y-4">
+                                </div>
+                            </div>
+
+                            <div class="divider">
+                                <span class="text-lg font-semibold"><i class="bi bi-download mr-3 text-info"></i>Downloader</span>
+                            </div>
+
+                            <div class="grid grid-cols-1 lg:grid-cols-4 gap-4" id="downloaderSection">
+                                <div>
+                                    <label class="label" for="default_download_action">
+                                        <span class="font-medium">Default Download Action</span>
+                                    </label>
+                                    <select class="select w-full" name="default_download_action"
+                                            id="default_download_action">
+                                        <option value="symlink">Create Symlink</option>
+                                        <option value="strm">Create STRM Files</option>
+                                        <option value="download">Download Files</option>
+                                        <option value="none">No Action</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="label" for="max_downloads">
+                                        <span class="font-medium">Maximum Downloads</span>
+                                    </label>
+                                    <input type="number" class="input w-full downloader-option" name="max_downloads"
+                                           id="max_downloads" min="0" disabled>
+                                    <span class="text-sm opacity-70">Max simultaneous downloads (0 = unlimited)</span>
+                                </div>
+                                <div>
+                                    <label class="label" for="download_connections">
+                                        <span class="font-medium">Connections per Download</span>
+                                    </label>
+                                    <input type="number" class="input w-full downloader-option" name="download_connections"
+                                           id="download_connections" min="1" max="64" placeholder="16" disabled>
+                                    <span class="text-sm opacity-70">Number of parallel connections per file</span>
+                                </div>
+                            </div>
+
+
+                            <div class="divider">
+                                <span class="text-lg font-semibold"><i class="bi bi-hdd-network mr-3 text-info"></i>WebDAV & External Rclone
+                                Settings</span>
+                            </div>
+
+                            <div class="space-y-6">
+                                <div class="space-y-4">
                                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
                                         <div>
                                             <label class="label" for="folder_naming">
@@ -275,7 +301,7 @@
                                                 <span class="font-medium">Refresh Directories</span>
                                             </label>
                                             <input type="text" class="input w-full" name="refresh_dirs"
-                                                id="refresh_dirs" placeholder="/path1,/path2">
+                                                   id="refresh_dirs" placeholder="/path1,/path2">
                                             <span class="text-sm opacity-70">Comma-separated list of directories to
                                                 refresh</span>
                                         </div>

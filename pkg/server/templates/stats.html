@@ -337,7 +337,7 @@
             mountStatus.textContent = 'Active';
             mountStatus.className = 'badge badge-success';
 
-            updateRcloneStats(mountData, mountContent);
+            updateRcloneStats(mountData.detail || {}, mountContent);
         }
 
         function updateDFSStats(data, statusEl, contentEl) {
@@ -351,14 +351,15 @@
             statusEl.textContent = 'Active';
             statusEl.className = 'badge badge-success';
 
-            const activeFiles = data.active_files || 0;
-            const totalFiles = data.total_files || 0;
-            const cacheItems = data.cache_item_count || data.cache_file_count || 0;
-            const cacheTotalSize = data.cache_total_size || 0;
-            const cacheMaxSize = data.cache_max_size || 0;
-            const cacheType = (data.cache_type || 'vfs').toUpperCase();
-            const cacheUtilizationValue = data.cache_utilization != null
-                ? data.cache_utilization
+            const detail = data.detail || {};
+            const activeFiles = detail.active_files || 0;
+            const totalFiles = detail.total_files || 0;
+            const cacheItems = detail.cache_item_count || 0;
+            const cacheTotalSize = detail.cache_total_size || 0;
+            const cacheMaxSize = detail.cache_max_size || 0;
+            const cacheType = (detail.cache_type || 'vfs').toUpperCase();
+            const cacheUtilizationValue = detail.cache_utilization != null
+                ? detail.cache_utilization
                 : (cacheMaxSize > 0 ? cacheTotalSize / cacheMaxSize : 0);
             const cacheUtilizationPercent = (cacheUtilizationValue * 100).toFixed(1);
             const cacheUsageNumber = Number(cacheUtilizationPercent);
@@ -366,35 +367,12 @@
                 : cacheUsageNumber > 75 ? 'text-warning'
                     : 'text-success';
 
-            const filesOpened = data.vfs_files_opened || 0;
-            const filesClosed = data.vfs_files_closed || 0;
-            const openHandles = Math.max(0, filesOpened - filesClosed);
-
-            const streamCalls = data.vfs_stream_calls || 0;
-
-            const cacheHits = data.vfs_cache_hits || 0;
-            const cacheMisses = data.vfs_cache_misses || 0;
-            const totalCacheLookups = cacheHits + cacheMisses;
-            const cacheHitRate = totalCacheLookups > 0 ? ((cacheHits / totalCacheLookups) * 100).toFixed(1) : '0.0';
-
-            const totalBytes = data.vfs_total_bytes || 0;
-            const totalChunks = data.vfs_total_chunks || 0;
-            const downloadersCreated = data.vfs_downloaders_created || 0;
-            const downloadersReused = data.vfs_downloaders_reused || 0;
-            const downloadErrors = data.vfs_download_errors || 0;
-            const retryAttempts = data.vfs_retry_attempts || 0;
-
             let html = `
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                     <div class="stat">
                         <div class="stat-title">Active Files</div>
                         <div class="stat-value text-primary">${formatNumber(activeFiles)}</div>
                         <div class="stat-desc">Total tracked: ${formatNumber(totalFiles)}</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-title">Open Handles</div>
-                        <div class="stat-value text-info">${formatNumber(openHandles)}</div>
-                        <div class="stat-desc">Opened ${formatNumber(filesOpened)} / Closed ${formatNumber(filesClosed)}</div>
                     </div>
                     <div class="stat">
                         <div class="stat-title">Cache Items</div>
@@ -405,42 +383,6 @@
                         <div class="stat-title">Cache Utilization</div>
                         <div class="stat-value ${cacheUsageTextClass}">${cacheUtilizationPercent}%</div>
                         <div class="stat-desc">${window.decypharrUtils.formatBytes(cacheTotalSize)} / ${window.decypharrUtils.formatBytes(cacheMaxSize)}</div>
-                    </div>
-                </div>
-            `;
-
-            html += `
-                <div class="divider">Streaming Activity</div>
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <div class="stat">
-                        <div class="stat-title">Streams Started</div>
-                        <div class="stat-value text-secondary">${formatNumber(streamCalls)}</div>
-                        <div class="stat-desc">Total manager.Stream calls</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-title">Cache Efficiency</div>
-                        <div class="stat-value ${cacheHitRate >= 80 ? 'text-success' : cacheHitRate >= 60 ? 'text-warning' : 'text-error'}">${cacheHitRate}% hits</div>
-                        <div class="stat-desc">${formatNumber(cacheHits)} hits / ${formatNumber(cacheMisses)} misses</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-title">Data Downloaded</div>
-                        <div class="stat-value text-primary">${window.decypharrUtils.formatBytes(totalBytes)}</div>
-                        <div class="stat-desc">${formatNumber(totalChunks)} chunks</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-title">Downloader Activity</div>
-                        <div class="stat-value text-info">${formatNumber(downloadersCreated)}</div>
-                        <div class="stat-desc">Reused ${formatNumber(downloadersReused)} times</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-title">Error Handling</div>
-                        <div class="stat-value ${downloadErrors > 0 ? 'text-warning' : 'text-success'}">${formatNumber(downloadErrors)} errors</div>
-                        <div class="stat-desc">${formatNumber(retryAttempts)} retry attempts</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-title">Cache Hits</div>
-                        <div class="stat-value text-secondary">${formatNumber(cacheHits)}</div>
-                        <div class="stat-desc">${formatNumber(cacheMisses)} misses</div>
                     </div>
                 </div>
             `;
@@ -908,16 +850,17 @@
 
         function updateStats(stats) {
             // System overview
-            document.getElementById('uptime').textContent = formatUptime(stats.uptime_seconds);
-            document.getElementById('start-time').textContent = `Started: ${stats.start_time || '-'}`;
-            document.getElementById('memory-used').textContent = stats.memory_used || '-';
-            document.getElementById('heap-alloc').textContent = `Heap: ${stats.heap_alloc_mb || '-'}`;
-            document.getElementById('goroutines').textContent = formatNumber(stats.goroutines || 0);
-            document.getElementById('gc-cycles').textContent = `GC: ${formatNumber(stats.gc_cycles || 0)} cycles`;
-            document.getElementById('num-cpu').textContent = stats.num_cpu || '-';
-            document.getElementById('arch').textContent = stats.arch || '-';
-            document.getElementById('os').textContent = stats.os || '-';
-            document.getElementById('go-version').textContent = stats.go_version || '-';
+            const sys = stats.system || {};
+            document.getElementById('uptime').textContent = formatUptime(sys.uptime_seconds);
+            document.getElementById('start-time').textContent = `Started: ${sys.start_time || '-'}`;
+            document.getElementById('memory-used').textContent = sys.memory_used || '-';
+            document.getElementById('heap-alloc').textContent = `Heap: ${sys.heap_alloc_mb || '-'}`;
+            document.getElementById('goroutines').textContent = formatNumber(sys.goroutines || 0);
+            document.getElementById('gc-cycles').textContent = `GC: ${formatNumber(sys.gc_cycles || 0)} cycles`;
+            document.getElementById('num-cpu').textContent = sys.num_cpu || '-';
+            document.getElementById('arch').textContent = sys.arch || '-';
+            document.getElementById('os').textContent = sys.os || '-';
+            document.getElementById('go-version').textContent = sys.go_version || '-';
 
             // Storage stats
             if (stats.storage) {

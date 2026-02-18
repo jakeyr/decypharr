@@ -6,10 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,11 +50,14 @@ type Cache struct {
 	cancel context.CancelFunc
 
 	createGroup singleflight.Group
+	threshold   int64
 }
 
 type candidateEntry struct {
 	key        string
-	path       string
+	path       string // entry directory (for cleanup of empty dirs)
+	dataPath   string // path to data file
+	metaPath   string // path to metadata .json file
 	atime      time.Time
 	mtime      time.Time
 	cachedSize int64 // Actual bytes on disk (from ranges)
@@ -69,28 +72,8 @@ func NewCache(ctx context.Context, mgr *manager.Manager, config *config.FuseConf
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
-	c := &Cache{
-		config:  config,
-		logger:  logger.New("dfs"),
-		items:   xsync.NewMap[string, *CacheItem](),
-		manager: mgr,
-		ctx:     ctx,
-		cancel:  cancel,
-	}
 
-	// Prime cache stats before serving requests so totalSize reflects existing files.
-	if err := c.rebuildIndex(); err != nil {
-		c.logger.Warn().Err(err).Msg("cache index rebuild failed")
-	}
-	go c.cleanupLoop()
-	return c, nil
-}
-
-func (c *Cache) rebuildIndex() error {
-	now := utils.Now()
-	candidates, totalSize := c.scanDiskCandidates()
-
-	maxSize := c.config.CacheDiskSize
+	maxSize := config.CacheDiskSize
 	threshold := int64(0)
 	if maxSize > 0 {
 		threshold = int64(float64(maxSize) * cacheEvictThreshold)
@@ -98,11 +81,17 @@ func (c *Cache) rebuildIndex() error {
 			threshold = maxSize
 		}
 	}
-
-	totalSize, _ = c.evictCandidates(now, candidates, totalSize, threshold)
-
-	c.totalSize.Store(totalSize)
-	return nil
+	c := &Cache{
+		config:    config,
+		logger:    logger.New("dfs"),
+		items:     xsync.NewMap[string, *CacheItem](),
+		manager:   mgr,
+		ctx:       ctx,
+		cancel:    cancel,
+		threshold: threshold,
+	}
+	go c.cleanupLoop()
+	return c, nil
 }
 
 // GetItem returns or creates a cache item for the given file
@@ -141,111 +130,108 @@ func (c *Cache) scanDiskCandidates() ([]candidateEntry, int64) {
 	var candidates []candidateEntry
 	var totalSize int64
 
-	walkErr := filepath.WalkDir(c.config.CacheDir, func(path string, d fs.DirEntry, err error) error {
+	topEntries, err := os.ReadDir(c.config.CacheDir)
+	if err != nil {
+		c.logger.Warn().Err(err).Msg("failed to read cache directory")
+		return candidates, totalSize
+	}
+
+	for _, topEntry := range topEntries {
+		if !topEntry.IsDir() {
+			continue
+		}
+
+		entryName := topEntry.Name()
+		entryDir := filepath.Join(c.config.CacheDir, entryName)
+
+		subEntries, err := os.ReadDir(entryDir)
 		if err != nil {
-			// Don't log every error - could be a race with creation
-			return nil
+			continue
 		}
 
-		// Skip non-files and non-meta.json files
-		if d.IsDir() {
-			// If it's an empty directory, remove it
-			entries, err := os.ReadDir(path)
-			if err == nil && len(entries) == 0 {
-				_ = os.Remove(path)
-				return nil
+		// Remove empty directories
+		if len(subEntries) == 0 {
+			_ = os.RemoveAll(entryDir)
+			continue
+		}
+
+		// Find data/meta pairs by .json suffix
+		for _, sub := range subEntries {
+			if sub.IsDir() || !strings.HasSuffix(sub.Name(), ".json") {
+				continue
 			}
-		}
-		if d.Name() != "meta.json" {
-			return nil
-		}
 
-		// Found a meta.json - the parent directory is the cache entry
-		entryDir := filepath.Dir(path)
+			// Derive the data filename from the meta filename
+			filename := strings.TrimSuffix(sub.Name(), ".json")
+			metaPath := filepath.Join(entryDir, sub.Name())
+			dataPath := filepath.Join(entryDir, filename)
+			key := buildCacheKey(entryName, filename)
 
-		// Derive cache key from path first
-		key, err := filepath.Rel(c.config.CacheDir, entryDir)
-		if err != nil {
-			return nil
-		}
-		key = filepath.ToSlash(key)
-
-		var opens int32
-		var inMap bool
-		if item, ok := c.items.Load(key); ok {
-			opens = item.opens.Load()
-			inMap = true
-		}
-
-		// Read and parse metadata
-		var info ItemInfo
-		metaData, metaErr := os.ReadFile(path)
-		if metaErr != nil {
-			// Only remove if not in the map - could be a race with creation
-			if !inMap {
-				_ = os.RemoveAll(entryDir)
+			var opens int32
+			var inMap bool
+			if item, ok := c.items.Load(key); ok {
+				opens = item.opens.Load()
+				inMap = true
 			}
-			return nil
-		}
 
-		if err := json.Unmarshal(metaData, &info); err != nil {
-			// Only remove corrupt metadata if not actively in use
-			if !inMap {
-				c.logger.Warn().Err(err).Str("path", entryDir).Msg("corrupt cache metadata, removing entry")
-				_ = os.RemoveAll(entryDir)
+			// Read and parse metadata
+			var info ItemInfo
+			metaData, metaErr := os.ReadFile(metaPath)
+			if metaErr != nil {
+				c.logger.Warn().Err(metaErr).Str("path", metaPath).Msg("failed to read cache metadata")
+				continue
 			}
-			return nil
-		}
 
-		// Verify data file exists
-		dataPath := filepath.Join(entryDir, "data")
-		dataStat, err := os.Stat(dataPath)
-		if err != nil {
-			// Only remove if not in the map
-			if !inMap {
-				_ = os.RemoveAll(entryDir)
+			if err := json.Unmarshal(metaData, &info); err != nil {
+				c.logger.Warn().Err(err).Str("path", metaPath).Msg("corrupt cache metadata")
+				continue
 			}
-			return nil
-		}
 
-		// Let's use the actual size on disk as the cached size, since the metadata size may be larger than what's actually present (especially if the file was truncated or not fully downloaded)
-		cachedSize := dataStat.Size()
+			// Verify data file exists
+			dataStat, err := os.Stat(dataPath)
+			if err != nil {
+				c.logger.Warn().Err(err).Str("path", dataPath).Msg("cache data file missing")
+				continue
+			}
 
-		// Set default times if missing
-		atime := info.ATime
-		mtime := info.ModTime
-		if atime.IsZero() {
-			atime = mtime
-		}
-		if mtime.IsZero() {
-			mtime = dataStat.ModTime()
+			cachedSize := info.Rs.Size()
+
+			// Set default times if missing
+			atime := info.ATime
+			mtime := info.ModTime
 			if atime.IsZero() {
 				atime = mtime
 			}
+			if mtime.IsZero() {
+				mtime = dataStat.ModTime()
+				if atime.IsZero() {
+					atime = mtime
+				}
+			}
+			candidates = append(candidates, candidateEntry{
+				key:        key,
+				path:       entryDir,
+				dataPath:   dataPath,
+				metaPath:   metaPath,
+				atime:      atime,
+				mtime:      mtime,
+				cachedSize: cachedSize,
+				opens:      opens,
+				inMap:      inMap,
+			})
+			totalSize += cachedSize
 		}
-
-		candidate := candidateEntry{
-			key:        key,
-			path:       entryDir,
-			atime:      atime,
-			mtime:      mtime,
-			cachedSize: cachedSize,
-			opens:      opens,
-			inMap:      inMap,
-		}
-		candidates = append(candidates, candidate)
-		totalSize += cachedSize
-
-		return nil
-	})
-	if walkErr != nil {
-		c.logger.Warn().Err(walkErr).Msg("cache cleanup walk failed")
 	}
 
 	return candidates, totalSize
 }
 
-func (c *Cache) evictCandidates(now time.Time, candidates []candidateEntry, totalSize, threshold int64) (int64, int) {
+func (c *Cache) evictCandidates(now time.Time, candidates []candidateEntry, totalSize int64, thresholdOverride int64) (int64, int) {
+	threshold := c.threshold
+	if thresholdOverride > 0 {
+		threshold = thresholdOverride
+	}
+
 	removed := make(map[string]struct{})
 	removeCandidate := func(candidate candidateEntry) {
 		if _, skip := removed[candidate.key]; skip {
@@ -255,8 +241,16 @@ func (c *Cache) evictCandidates(now time.Time, candidates []candidateEntry, tota
 		if candidate.inMap || candidate.opens > 0 {
 			return
 		}
-		if err := os.RemoveAll(candidate.path); err != nil {
-			c.logger.Warn().Err(err).Str("path", candidate.path).Msg("failed to remove cache entry")
+		// Remove only the specific data + meta files, not the entire entry directory
+		if candidate.dataPath != "" {
+			if err := os.Remove(candidate.dataPath); err != nil && !os.IsNotExist(err) {
+				c.logger.Warn().Err(err).Str("path", candidate.dataPath).Msg("failed to remove cache data file")
+			}
+		}
+		if candidate.metaPath != "" {
+			if err := os.Remove(candidate.metaPath); err != nil && !os.IsNotExist(err) {
+				c.logger.Warn().Err(err).Str("path", candidate.metaPath).Msg("failed to remove cache meta file")
+			}
 		}
 		removed[candidate.key] = struct{}{}
 	}
@@ -302,13 +296,13 @@ func (c *Cache) evictCandidates(now time.Time, candidates []candidateEntry, tota
 // newItem creates a new cache item
 func (c *Cache) newItem(key, entryName, filename string, fileSize int64) (*CacheItem, error) {
 	// Create directory structure
-	itemDir := filepath.Join(c.config.CacheDir, key)
+	itemDir := filepath.Join(c.config.CacheDir, entryName)
 	if err := os.MkdirAll(itemDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create item dir: %w", err)
 	}
 
-	cachePath := filepath.Join(itemDir, "data")
-	metaPath := filepath.Join(itemDir, "meta.json")
+	cachePath := filepath.Join(itemDir, filename)
+	metaPath := filepath.Join(itemDir, filename+".json")
 
 	// Try to load existing metadata
 	var info ItemInfo
@@ -319,15 +313,17 @@ func (c *Cache) newItem(key, entryName, filename string, fileSize int64) (*Cache
 		}
 	}
 
+	// if cachePath is a directory, remove it to avoid conflicts with file creation
+	if stat, err := os.Stat(cachePath); err == nil && stat.IsDir() {
+		if err := os.RemoveAll(cachePath); err != nil {
+			return nil, fmt.Errorf("failed to remove directory at cache path: %w", err)
+		}
+	}
+
 	// Open or create sparse file
 	fd, err := os.OpenFile(cachePath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open cache file: %w", err)
-	}
-
-	// Make it sparse and set size
-	if err := setSparse(fd); err != nil {
-		c.logger.Warn().Err(err).Msg("failed to set sparse (may not be supported)")
 	}
 
 	if err := fd.Truncate(fileSize); err != nil {
@@ -354,12 +350,13 @@ func (c *Cache) newItem(key, entryName, filename string, fileSize int64) (*Cache
 		filename: filename,
 		file:     fd,
 		metaPath: metaPath,
+		readBuf:  newTailReadBuffer(c.config.MemoryBufferSize),
 		info:     info,
 		logger:   log.Rate(buildCacheKey(entryName, filename)),
 	}
 
 	// Create downloaders coordinator
-	item.downloaders = NewDownloaders(c.ctx, c.manager, item, c.config)
+	item.downloaders.Store(NewDownloaders(c.ctx, c.manager, item, c.config))
 	item.startMetaWriter()
 	item.markMetadataDirty()
 
@@ -370,6 +367,9 @@ func (c *Cache) newItem(key, entryName, filename string, fileSize int64) (*Cache
 func (c *Cache) cleanupLoop() {
 	ticker := time.NewTicker(c.config.CacheCleanupInterval)
 	defer ticker.Stop()
+
+	// Run cleanup immediately on startup to remove stale items before they can be accessed
+	c.cleanup()
 
 	for {
 		select {
@@ -409,21 +409,15 @@ func (c *Cache) cleanup() {
 		}
 	}
 
-	maxSize := c.config.CacheDiskSize
-	threshold := int64(float64(maxSize) * cacheEvictThreshold)
-	if threshold <= 0 {
-		threshold = maxSize
-	}
-
 	oldSize := c.totalSize.Load()
 	candidates, totalSize := c.scanDiskCandidates()
 
 	// If cache expiry is disabled and we're under threshold, skip disk scan.
-	if c.config.CacheExpiry <= 0 && (maxSize <= 0 || totalSize <= threshold) {
+	if c.config.CacheExpiry <= 0 && (c.threshold <= 0 || totalSize <= c.threshold) {
 		return
 	}
 
-	totalSize, removedCount := c.evictCandidates(now, candidates, totalSize, threshold)
+	totalSize, removedCount := c.evictCandidates(now, candidates, totalSize, 0)
 
 	if removedCount > 0 && oldSize > totalSize {
 		c.logger.Trace().Msgf("cache cleanup removed %d entries, freed %s (total size: %s)", removedCount, utils.FormatSize(oldSize-totalSize), utils.FormatSize(totalSize))
@@ -472,16 +466,17 @@ type CacheItem struct {
 
 	file     *os.File
 	metaPath string
+	readBuf  *tailReadBuffer
 
 	info ItemInfo
 
 	opens       atomic.Int32 // Number of open handles (prevents eviction)
 	logger      *logger.RateLimitedEvent
-	downloaders *Downloaders // Download coordinator
+	downloaders atomic.Pointer[Downloaders] // Download coordinator
 
-	metaMu sync.RWMutex
-	fileMu sync.RWMutex
-	dlMu   sync.Mutex
+	metaMu    sync.RWMutex
+	fileMu    sync.RWMutex
+	lastTouch atomic.Int64 // Unix nano for rate-limited touch()
 
 	metaDirty   atomic.Bool
 	metaFlushCh chan struct{}
@@ -574,10 +569,18 @@ type ItemInfo struct {
 	ATime   time.Time     `json:"atime"`
 }
 
-// touch updates access time
+// touch updates access time, rate-limited to once per second to reduce lock contention
 func (item *CacheItem) touch() {
+	now := time.Now().UnixNano()
+	last := item.lastTouch.Load()
+	if now-last < int64(time.Second) {
+		return
+	}
+	if !item.lastTouch.CompareAndSwap(last, now) {
+		return
+	}
 	item.metaMu.Lock()
-	item.info.ATime = utils.Now()
+	item.info.ATime = time.Unix(0, now)
 	item.metaMu.Unlock()
 	item.markMetadataDirty()
 }
@@ -593,17 +596,26 @@ func (item *CacheItem) Release() {
 	newCount := item.opens.Add(-1)
 	if newCount < 0 {
 		item.opens.Store(0)
+		if item.readBuf != nil {
+			item.readBuf.Clear()
+		}
+		return
+	}
+	if newCount == 0 {
+		if item.readBuf != nil {
+			item.readBuf.Clear()
+		}
+		// Stop background downloads when last handle is closed.
+		// StopAll() cancels in-flight HTTP requests via context and
+		// recreates a fresh context so downloads resume if reopened.
+		item.StopDownloaders()
 	}
 }
 
 // StopDownloaders stops active downloads but keeps the cache item alive
 // for potential cache reuse. This is called when all file handles are closed.
 func (item *CacheItem) StopDownloaders() {
-	item.dlMu.Lock()
-	dls := item.downloaders
-	item.dlMu.Unlock()
-
-	if dls != nil {
+	if dls := item.downloaders.Load(); dls != nil {
 		dls.StopAll()
 	}
 }
@@ -623,10 +635,15 @@ func (item *CacheItem) ReadAt(p []byte, off int64) (int, error) {
 
 	r := ranges.Range{Pos: off, Size: readSize}
 
+	// Fast path: satisfy from bounded in-memory tail buffer.
+	if item.readBuf != nil {
+		if n, ok := item.readBuf.ReadAt(p, off); ok {
+			return n, nil
+		}
+	}
+
 	// Ensure data is on disk (may block)
-	item.dlMu.Lock()
-	dls := item.downloaders
-	item.dlMu.Unlock()
+	dls := item.downloaders.Load()
 	if dls == nil {
 		return 0, errors.New("downloaders closed")
 	}
@@ -644,6 +661,9 @@ func (item *CacheItem) ReadAt(p []byte, off int64) (int, error) {
 	n, err := f.ReadAt(p, off)
 	item.fileMu.RUnlock()
 	if n > 0 {
+		if item.readBuf != nil {
+			item.readBuf.WriteAt(off, p[:n])
+		}
 		dropFileCache(f, off, int64(n))
 	}
 	return n, err
@@ -661,9 +681,11 @@ func (item *CacheItem) WriteAtNoOverwrite(p []byte, off int64) (n, skipped int, 
 	item.metaMu.RUnlock()
 	frs := rsSnapshot.FindAll(writeRange)
 
-	item.fileMu.Lock()
+	// RLock is sufficient: pwrite(2) is goroutine-safe at different offsets,
+	// and the lock only guards against the file being closed during I/O.
+	item.fileMu.RLock()
 	if item.file == nil {
-		item.fileMu.Unlock()
+		item.fileMu.RUnlock()
 		return n, skipped, errors.New("cache file closed")
 	}
 	f := item.file
@@ -677,16 +699,19 @@ func (item *CacheItem) WriteAtNoOverwrite(p []byte, off int64) (n, skipped int, 
 		localOff := fr.R.Pos - off
 		_, err = f.WriteAt(p[localOff:localOff+fr.R.Size], fr.R.Pos)
 		if err != nil {
-			item.fileMu.Unlock()
+			item.fileMu.RUnlock()
 			return n, skipped, err
 		}
 	}
-	item.fileMu.Unlock()
+	item.fileMu.RUnlock()
 
 	// Mark range as present
 	item.metaMu.Lock()
 	item.info.Rs.Insert(writeRange)
 	item.metaMu.Unlock()
+	if item.readBuf != nil && n > 0 {
+		item.readBuf.WriteAt(off, p[:n])
+	}
 	item.markMetadataDirty()
 	return n, skipped, nil
 }
@@ -716,11 +741,8 @@ func (item *CacheItem) FindMissing(r ranges.Range) ranges.Range {
 // Close closes the cache item and saves metadata
 func (item *CacheItem) Close() error {
 	item.closeOnce.Do(func() {
-		// Stop downloaders without holding the downloaders lock to avoid deadlocks.
-		item.dlMu.Lock()
-		dls := item.downloaders
-		item.downloaders = nil
-		item.dlMu.Unlock()
+		// Atomically swap out the downloaders pointer so no new reads can use it.
+		dls := item.downloaders.Swap(nil)
 
 		if dls != nil {
 			if err := dls.Close(nil); err != nil && item.closeErr == nil {
@@ -739,6 +761,9 @@ func (item *CacheItem) Close() error {
 			item.file = nil
 		}
 		item.fileMu.Unlock()
+		if item.readBuf != nil {
+			item.readBuf.Clear()
+		}
 	})
 	return item.closeErr
 }
@@ -748,12 +773,4 @@ func (item *CacheItem) Close() error {
 func buildCacheKey(entryName, filename string) string {
 	// Create safe filesystem key
 	return fmt.Sprintf("%s/%s", entryName, filename)
-}
-
-// setSparse attempts to make a file sparse (platform-specific)
-func setSparse(f *os.File) error {
-	// On Unix, files are sparse by default when using Truncate
-	// On Windows, we'd need to use DeviceIoControl with FSCTL_SET_SPARSE
-	// For now, just return nil - sparse behavior is automatic on most systems
-	return nil
 }

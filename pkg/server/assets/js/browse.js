@@ -6,12 +6,15 @@ class FileBrowser {
             currentPage: 1,
             itemsPerPage: 20,
             searchQuery: '',
+            sortBy: 'name',
+            sortOrder: 'asc',
             entries: [],
             total: 0,
             totalPages: 0,
             parentDir: null,
             selectedEntry: null,
-            selectedEntries: new Set()
+            selectedEntries: new Set(),
+            selectedEntryData: new Map()
         };
 
         this.refs = {
@@ -19,6 +22,7 @@ class FileBrowser {
             refreshBtn: document.getElementById('refreshBtn'),
             searchInput: document.getElementById('searchInput'),
             pageSizeSelect: document.getElementById('pageSizeSelect'),
+            sortHeaderButtons: document.querySelectorAll('[data-sort-key]'),
             fileBrowserList: document.getElementById('fileBrowserList'),
             paginationInfo: document.getElementById('paginationInfo'),
             paginationControls: document.getElementById('paginationControls'),
@@ -29,28 +33,25 @@ class FileBrowser {
             bulkActionsBar: document.getElementById('bulkActionsBar'),
             selectedCount: document.getElementById('selectedCount'),
             bulkDownloadBtn: document.getElementById('bulkDownloadBtn'),
-            bulkMoveBtn: document.getElementById('bulkMoveBtn'),
+            bulkRepairBtn: document.getElementById('bulkRepairBtn'),
             bulkDeleteBtn: document.getElementById('bulkDeleteBtn'),
             clearSelectionBtn: document.getElementById('clearSelectionBtn'),
 
             // Modals
-            moveTorrentModal: document.getElementById('moveTorrentModal'),
-            moveTorrentName: document.getElementById('moveTorrentName'),
-            moveCurrentDebrid: document.getElementById('moveCurrentDebrid'),
-            moveTargetDebrid: document.getElementById('moveTargetDebrid'),
-            moveKeepSource: document.getElementById('moveKeepSource'),
-            moveWaitComplete: document.getElementById('moveWaitComplete'),
-            confirmMoveBtn: document.getElementById('confirmMoveBtn'),
+            repairSelectionModal: document.getElementById('repairSelectionModal'),
+            repairSelectionCount: document.getElementById('repairSelectionCount'),
+            repairModeSelect: document.getElementById('repairModeSelect'),
+            confirmRepairBtn: document.getElementById('confirmRepairBtn'),
 
             // Context menu
             contextMenu: document.getElementById('contextMenu'),
             contextDownload: document.getElementById('contextDownload'),
-            contextMove: document.getElementById('contextMove'),
             contextDelete: document.getElementById('contextDelete')
         };
 
-        this.currentMoveTarget = null;
         this.searchTimeout = null;
+        this.activeLoadController = null;
+        this.loadRequestSeq = 0;
 
         this.init();
     }
@@ -84,6 +85,15 @@ class FileBrowser {
             this.refresh();
         });
 
+        // Sort headers
+        if (this.refs.sortHeaderButtons) {
+            this.refs.sortHeaderButtons.forEach(btn => {
+                btn.addEventListener('click', () => {
+                    this.handleSortHeaderClick(btn.dataset.sortKey);
+                });
+            });
+        }
+
         // Select all checkbox
         if (this.refs.selectAllCheckbox) {
             this.refs.selectAllCheckbox.addEventListener('change', (e) => {
@@ -95,8 +105,8 @@ class FileBrowser {
         if (this.refs.bulkDownloadBtn) {
             this.refs.bulkDownloadBtn.addEventListener('click', () => this.bulkDownload());
         }
-        if (this.refs.bulkMoveBtn) {
-            this.refs.bulkMoveBtn.addEventListener('click', () => this.bulkMove());
+        if (this.refs.bulkRepairBtn) {
+            this.refs.bulkRepairBtn.addEventListener('click', () => this.openRepairModal());
         }
         if (this.refs.bulkDeleteBtn) {
             this.refs.bulkDeleteBtn.addEventListener('click', () => this.bulkDelete());
@@ -105,9 +115,8 @@ class FileBrowser {
             this.refs.clearSelectionBtn.addEventListener('click', () => this.clearSelection());
         }
 
-        // Move torrent
-        if (this.refs.confirmMoveBtn) {
-            this.refs.confirmMoveBtn.addEventListener('click', () => this.executeTorrentMove());
+        if (this.refs.confirmRepairBtn) {
+            this.refs.confirmRepairBtn.addEventListener('click', () => this.executeRepairSelection());
         }
 
         // Hide context menu on click outside
@@ -154,6 +163,14 @@ class FileBrowser {
         if (this.refs.pageSizeSelect) {
             this.refs.pageSizeSelect.value = this.state.itemsPerPage.toString();
         }
+
+        // Load sorting from URL
+        const sortBy = params.get('sort_by');
+        this.state.sortBy = this.isValidSortBy(sortBy) ? sortBy : 'name';
+
+        const sortOrder = params.get('sort_order');
+        this.state.sortOrder = sortOrder === 'desc' ? 'desc' : 'asc';
+        this.updateSortHeaderIndicators();
     }
 
     updateURL() {
@@ -179,6 +196,14 @@ class FileBrowser {
             params.set('limit', this.state.itemsPerPage);
         }
 
+        // Include sort params if not defaults
+        if (this.state.sortBy !== 'name') {
+            params.set('sort_by', this.state.sortBy);
+        }
+        if (this.state.sortOrder !== 'asc') {
+            params.set('sort_order', this.state.sortOrder);
+        }
+
         const newURL = `${window.location.pathname}${params.toString() ? '?' + params.toString() : ''}`;
         window.history.pushState({}, '', newURL);
     }
@@ -195,6 +220,12 @@ class FileBrowser {
     }
 
     async loadEntries() {
+        const requestId = ++this.loadRequestSeq;
+        if (this.activeLoadController) {
+            this.activeLoadController.abort();
+        }
+        this.activeLoadController = new AbortController();
+
         try {
             // Build API URL based on path depth
             const pathParts = this.state.currentPath.split('/').filter(p => p);
@@ -213,17 +244,22 @@ class FileBrowser {
             // Add query params
             const params = new URLSearchParams({
                 page: this.state.currentPage,
-                limit: this.state.itemsPerPage
+                limit: this.state.itemsPerPage,
+                sort_by: this.state.sortBy,
+                sort_order: this.state.sortOrder
             });
 
             if (this.state.searchQuery) {
                 params.set('search', this.state.searchQuery);
             }
 
-            const response = await fetch(`${apiUrl}?${params}`);
+            const response = await fetch(`${apiUrl}?${params}`, { signal: this.activeLoadController.signal });
             if (!response.ok) throw new Error('Failed to load directory');
 
             const data = await response.json();
+            if (requestId !== this.loadRequestSeq) {
+                return;
+            }
             this.state.entries = data.entries || [];
             this.state.total = data.total || 0;
             this.state.totalPages = data.total_pages || 0;
@@ -233,6 +269,9 @@ class FileBrowser {
             this.renderEntries();
             this.renderPagination();
         } catch (error) {
+            if (error.name === 'AbortError') {
+                return;
+            }
             console.error('Error loading entries:', error);
             window.createToast('Failed to load directory', 'error');
         }
@@ -321,9 +360,6 @@ class FileBrowser {
                                     </a></li>
                                 ` : ''}
                                 ${entry.can_delete ? `
-                                    <li><a onclick="window.fileBrowser.showMoveModal('${this.escapeJs(entry.info_hash)}')">
-                                        <i class="bi bi-arrow-left-right"></i> Switch Provider
-                                    </a></li>
                                     <li><a onclick="window.fileBrowser.deleteTorrent('${this.escapeJs(entry.info_hash)}', '${this.escapeJs(entry.name)}')" class="text-error">
                                         <i class="bi bi-trash"></i> Delete
                                     </a></li>
@@ -390,6 +426,43 @@ class FileBrowser {
         this.refresh();
     }
 
+    isValidSortBy(sortBy) {
+        return ['name', 'size', 'mod_time', 'active_debrid'].includes(sortBy);
+    }
+
+    handleSortHeaderClick(sortBy) {
+        if (!this.isValidSortBy(sortBy)) {
+            return;
+        }
+
+        if (this.state.sortBy === sortBy) {
+            this.state.sortOrder = this.state.sortOrder === 'asc' ? 'desc' : 'asc';
+        } else {
+            this.state.sortBy = sortBy;
+            // Fresh column defaults: text asc, numeric/time desc.
+            this.state.sortOrder = (sortBy === 'size' || sortBy === 'mod_time') ? 'desc' : 'asc';
+        }
+
+        this.state.currentPage = 1;
+        this.updateSortHeaderIndicators();
+        this.updateURL();
+        this.refresh();
+    }
+
+    updateSortHeaderIndicators() {
+        const sortKeys = ['name', 'size', 'mod_time', 'active_debrid'];
+        sortKeys.forEach(key => {
+            const indicator = document.getElementById(`sortIndicator-${key}`);
+            if (!indicator) return;
+
+            if (this.state.sortBy === key) {
+                indicator.className = this.state.sortOrder === 'asc' ? 'bi bi-sort-down text-xs' : 'bi bi-sort-up text-xs';
+            } else {
+                indicator.className = 'bi bi-arrow-down-up text-xs';
+            }
+        });
+    }
+
     handleEntryClick(path, isDir, name) {
         if (isDir) {
             this.navigate(path);
@@ -416,12 +489,9 @@ class FileBrowser {
         }
 
         if (entry.can_delete) {
-            this.refs.contextMove.classList.remove('hidden');
             this.refs.contextDelete.classList.remove('hidden');
-            this.refs.contextMove.onclick = () => this.showMoveModal(entry.info_hash);
             this.refs.contextDelete.onclick = () => this.deleteTorrent(entry.info_hash, entry.name);
         } else {
-            this.refs.contextMove.classList.add('hidden');
             this.refs.contextDelete.classList.add('hidden');
         }
 
@@ -444,74 +514,6 @@ class FileBrowser {
 
         const downloadUrl = `${window.urlBase}api/browse/download/${encodeURIComponent(torrentName)}/${encodeURIComponent(file)}`;
         window.open(downloadUrl, '_blank');
-    }
-
-    async showMoveModal(infoHash) {
-        this.hideContextMenu();
-
-        try {
-            const response = await fetch(`${window.urlBase}api/browse/torrents/${infoHash}/info`);
-            if (!response.ok) throw new Error('Failed to load item info');
-
-            const torrent = await response.json();
-            this.currentMoveTarget = torrent;
-
-            this.refs.moveTorrentName.textContent = torrent.name;
-            this.refs.moveCurrentDebrid.textContent = torrent.active_debrid || 'None';
-
-            // Populate target debrid options
-            this.refs.moveTargetDebrid.innerHTML = '<option disabled selected>Select debrid provider</option>';
-
-            const configResponse = await fetch(`${window.urlBase}api/config`);
-            if (configResponse.ok) {
-                const config = await configResponse.json();
-                config.debrids.forEach(debrid => {
-                    if (debrid.name !== torrent.active_debrid) {
-                        const option = document.createElement('option');
-                        option.value = debrid.name;
-                        option.textContent = debrid.name.charAt(0).toUpperCase() + debrid.name.slice(1);
-                        this.refs.moveTargetDebrid.appendChild(option);
-                    }
-                });
-            }
-
-            this.refs.moveTorrentModal.showModal();
-        } catch (error) {
-            console.error('Error loading item info:', error);
-            window.createToast('Failed to load item info', 'error');
-        }
-    }
-
-    async executeTorrentMove() {
-        if (!this.currentMoveTarget) return;
-
-        const targetDebrid = this.refs.moveTargetDebrid.value;
-        if (!targetDebrid) {
-            window.createToast('Please select a target debrid', 'warning');
-            return;
-        }
-
-        try {
-            const response = await fetch(`${window.urlBase}api/browse/torrents/${this.currentMoveTarget.info_hash}/move`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    target_debrid: targetDebrid,
-                    keep_source: this.refs.moveKeepSource.checked,
-                    wait_complete: this.refs.moveWaitComplete.checked
-                })
-            });
-
-            if (!response.ok) throw new Error('Failed to move torrent');
-
-            this.refs.moveTorrentModal.close();
-            window.createToast(`Migration started for ${this.currentMoveTarget.name}`, 'success');
-
-            setTimeout(() => this.refresh(), 2000);
-        } catch (error) {
-            console.error('Error moving torrent:', error);
-            window.createToast('Failed to move torrent', 'error');
-        }
     }
 
     async deleteTorrent(infoHash, name) {
@@ -569,8 +571,12 @@ class FileBrowser {
     handleEntrySelect(entryId, checked, entry) {
         if (checked) {
             this.state.selectedEntries.add(entryId);
+            if (entry) {
+                this.state.selectedEntryData.set(entryId, entry);
+            }
         } else {
             this.state.selectedEntries.delete(entryId);
+            this.state.selectedEntryData.delete(entryId);
         }
         this.updateSelectionUI();
     }
@@ -580,9 +586,14 @@ class FileBrowser {
             this.state.entries.forEach(entry => {
                 const entryId = entry.info_hash || entry.path;
                 this.state.selectedEntries.add(entryId);
+                this.state.selectedEntryData.set(entryId, entry);
             });
         } else {
-            this.state.selectedEntries.clear();
+            this.state.entries.forEach(entry => {
+                const entryId = entry.info_hash || entry.path;
+                this.state.selectedEntries.delete(entryId);
+                this.state.selectedEntryData.delete(entryId);
+            });
         }
 
         // Update all checkboxes
@@ -624,6 +635,7 @@ class FileBrowser {
 
     clearSelection() {
         this.state.selectedEntries.clear();
+        this.state.selectedEntryData.clear();
         document.querySelectorAll('.entry-checkbox').forEach(checkbox => {
             checkbox.checked = false;
         });
@@ -646,23 +658,6 @@ class FileBrowser {
         window.createToast(`Downloading ${files.length} file(s)`, 'success');
     }
 
-    async bulkMove() {
-        const selectedEntries = this.getSelectedEntries();
-        const torrents = selectedEntries.filter(e => e.can_delete && e.info_hash);
-
-        if (torrents.length === 0) {
-            window.createToast('No items selected for moving', 'warning');
-            return;
-        }
-
-        if (torrents.length === 1) {
-            this.showMoveModal(torrents[0].info_hash);
-            return;
-        }
-
-        window.createToast('Bulk move not yet implemented for multiple items', 'info');
-    }
-
     async bulkDelete() {
         const selectedEntries = this.getSelectedEntries();
         const torrents = selectedEntries.filter(e => e.can_delete && e.info_hash);
@@ -677,33 +672,120 @@ class FileBrowser {
             return;
         }
 
-        let successCount = 0;
-        for (const torrent of torrents) {
-            try {
-                const response = await fetch(`${window.urlBase}api/browse/torrents/${torrent.info_hash}`, {
-                    method: 'DELETE'
-                });
-
-                if (response.ok) {
-                    successCount++;
-                    this.state.selectedEntries.delete(torrent.info_hash);
-                }
-            } catch (error) {
-                console.error(`Error deleting item ${torrent.name}:`, error);
-            }
-        }
-
-        if (successCount > 0) {
-            window.createToast(`Deleted ${successCount} of ${torrents.length} torrent(s)`, 'success');
+        const ids = [...new Set(torrents.map(t => t.info_hash).filter(Boolean))];
+        try {
+            const response = await fetch(`${window.urlBase}api/browse/torrents/batch`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ids })
+            });
+            if (!response.ok) throw new Error('Failed to delete selected items');
+            window.createToast(`Deleted ${ids.length} torrent(s)`, 'success');
             this.clearSelection();
             this.refresh();
+        } catch (error) {
+            console.error('Error deleting selected items:', error);
+            window.createToast('Failed to delete selected items', 'error');
         }
     }
 
     getSelectedEntries() {
-        return this.state.entries.filter(entry => {
-            const entryId = entry.info_hash || entry.path;
-            return this.state.selectedEntries.has(entryId);
+        return Array.from(this.state.selectedEntryData.values()).filter(Boolean);
+    }
+
+    openRepairModal() {
+        const selectedEntries = this.getSelectedEntries();
+        if (selectedEntries.length === 0) {
+            window.createToast('No items selected for repair', 'warning');
+            return;
+        }
+
+        if (this.refs.repairSelectionCount) {
+            this.refs.repairSelectionCount.textContent = selectedEntries.length;
+        }
+        if (this.refs.repairModeSelect) {
+            this.refs.repairModeSelect.value = 'detect_only';
+        }
+        this.refs.repairSelectionModal?.showModal();
+    }
+
+    buildRepairFilters(selectedEntries) {
+        const filters = new Set();
+
+        selectedEntries.forEach(entry => {
+            if (!entry || !entry.name) {
+                return;
+            }
+
+            if (entry.is_dir) {
+                if (!entry.info_hash && !entry.can_delete) {
+                    return;
+                }
+                if (entry.info_hash) {
+                    filters.add(entry.info_hash);
+                } else {
+                    filters.add(entry.name);
+                }
+                return;
+            }
+
+            if (entry.info_hash) {
+                filters.add(`${entry.info_hash}:${entry.name}`);
+            } else {
+                filters.add(entry.name);
+            }
         });
+
+        return Array.from(filters);
+    }
+
+    async executeRepairSelection() {
+        const selectedEntries = this.getSelectedEntries();
+        if (selectedEntries.length === 0) {
+            window.createToast('No items selected for repair', 'warning');
+            return;
+        }
+
+        const mediaIds = this.buildRepairFilters(selectedEntries);
+        if (mediaIds.length === 0) {
+            window.createToast('Unable to derive repair filters from selection', 'warning');
+            return;
+        }
+
+        const mode = this.refs.repairModeSelect?.value || 'detect_only';
+        const payload = {
+            scope: 'managed_entries',
+            mode,
+            autoProcess: mode === 'detect_and_repair',
+            mediaIds
+        };
+
+        try {
+            if (this.refs.confirmRepairBtn) {
+                this.refs.confirmRepairBtn.disabled = true;
+            }
+
+            const response = await fetch(`${window.urlBase}api/repair`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(errorText || 'Failed to start repair');
+            }
+
+            const result = await response.json();
+            this.refs.repairSelectionModal?.close();
+            window.createToast(`Repair started (${mode === 'detect_and_repair' ? 'detect+repair' : 'detect only'}). ID: ${(result.job_id || '').substring(0, 8)}`, 'success');
+        } catch (error) {
+            console.error('Error starting repair:', error);
+            window.createToast(`Failed to start repair: ${error.message}`, 'error');
+        } finally {
+            if (this.refs.confirmRepairBtn) {
+                this.refs.confirmRepairBtn.disabled = false;
+            }
+        }
     }
 }

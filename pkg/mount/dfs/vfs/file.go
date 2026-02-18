@@ -16,7 +16,7 @@ type StreamingFile struct {
 // NewStreamingFile creates a new streaming file handle
 func NewStreamingFile(item *CacheItem) *StreamingFile {
 	item.Open() // Increment opens count
-	GlobalVFSStats.FilesOpened.Add(1)
+
 	return &StreamingFile{
 		item:     item,
 		fileSize: item.info.Size,
@@ -61,6 +61,6 @@ func (f *StreamingFile) Close() error {
 		return nil
 	}
 	f.item.Release() // Decrement opens count
-	GlobalVFSStats.FilesClosed.Add(1)
+
 	return nil
 }

@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Tensai75/rapidyenc"
 	"github.com/rs/zerolog"
+	nntpyenc "github.com/sirrobot01/decypharr/internal/nntp/yenc"
 )
 
 // Note: Timeout values are defined in TimeoutConfig (client.go)
@@ -211,13 +211,11 @@ func (c *Connection) GetHeader(messageID string, maxSnippet int) (*YencMetadata,
 	_ = c.conn.SetReadDeadline(time.Now().Add(timeouts.StreamBodyTimeout))
 	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
 
-	// Create streaming decoder
-	dec := rapidyenc.AcquireDecoder(c.reader)
-	defer rapidyenc.ReleaseDecoder(dec)
+	bodyReader := c.text.DotReader()
+	dec := nntpyenc.AcquireDecoder(bodyReader)
+	defer nntpyenc.ReleaseDecoder(dec)
 
-	// Read snippet to trigger header parsing in rapidyenc
-	// We need to read at least 1 byte for it to process the header if it hasn't already?
-	// rapidyenc usually reads lazily.
+	// Read snippet to trigger header parsing and capture metadata.
 	snippet := make([]byte, maxSnippet)
 	n, err := io.ReadFull(dec, snippet)
 	if err != nil && err != io.EOF && !errors.Is(err, io.ErrUnexpectedEOF) {
@@ -226,17 +224,16 @@ func (c *Connection) GetHeader(messageID string, maxSnippet int) (*YencMetadata,
 	}
 	// Truncate snippet to actual read size
 	snippet = snippet[:n]
-	yencMeta := dec.Meta
 	meta := &YencMetadata{
-		Name:    yencMeta.FileName,
-		Size:    yencMeta.FileSize,
-		Part:    yencMeta.PartNumber,
-		Total:   yencMeta.TotalParts,
-		Offset:  yencMeta.Offset,
-		PartSize: yencMeta.PartSize,
-		Begin:   yencMeta.Begin(),
-		End:     yencMeta.End(),
-		Snippet: snippet,
+		Name:     dec.Meta.FileName,
+		Size:     dec.Meta.FileSize,
+		Part:     dec.Meta.PartNumber,
+		Total:    dec.Meta.TotalParts,
+		Offset:   dec.Meta.Offset,
+		PartSize: dec.Meta.PartSize,
+		Begin:    dec.Meta.Begin(),
+		End:      dec.Meta.End(),
+		Snippet:  snippet,
 	}
 
 	// Close connection to stop stream
@@ -269,8 +266,8 @@ func (c *Connection) GetBody(messageID string) ([]byte, error) {
 }
 
 // GetDecodedBody retrieves and decodes article body using streaming yEnc decode.
-// Uses textproto.DotReader + rapidyenc streaming decoder to decode while reading
-// from the network - no intermediate buffering of the full body.
+// Uses textproto.DotReader + streaming decoder to decode while reading from the
+// network, avoiding intermediate full encoded-body buffering.
 func (c *Connection) GetDecodedBody(messageID string) ([]byte, error) {
 	messageID = FormatMessageID(messageID)
 	if err := c.sendCommand(fmt.Sprintf("BODY %s", messageID)); err != nil {
@@ -290,9 +287,10 @@ func (c *Connection) GetDecodedBody(messageID string) ([]byte, error) {
 	_ = c.conn.SetReadDeadline(time.Now().Add(timeouts.StreamBodyTimeout))
 	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }()
 
-	dec := rapidyenc.AcquireDecoder(c.reader)
+	bodyReader := c.text.DotReader()
+	dec := nntpyenc.AcquireDecoder(bodyReader)
 	// Always release decoder back to pool, even on panic
-	defer rapidyenc.ReleaseDecoder(dec)
+	defer nntpyenc.ReleaseDecoder(dec)
 
 	// Pre-allocate output buffer for decoded data (~700KB typical)
 	output := bytes.NewBuffer(make([]byte, 0, 750*1024))
@@ -301,6 +299,8 @@ func (c *Connection) GetDecodedBody(messageID string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("streaming yenc decode failed: %w", err)
 	}
+	// Decoder may stop at =yend before DotReader reaches article terminator.
+	_, _ = io.Copy(io.Discard, bodyReader)
 	decoded := output.Bytes()
 
 	return decoded, nil
@@ -325,10 +325,13 @@ func (c *Connection) StreamBody(messageID string, w io.Writer) (int64, error) {
 	_ = c.conn.SetReadDeadline(time.Now().Add(timeouts.StreamBodyTimeout))
 	defer func() { _ = c.conn.SetReadDeadline(time.Time{}) }() // Clear deadline
 
-	dec := rapidyenc.AcquireDecoder(c.reader)
+	bodyReader := c.text.DotReader()
+	dec := nntpyenc.AcquireDecoder(bodyReader)
 	// Always release decoder back to pool, even on panic
-	defer rapidyenc.ReleaseDecoder(dec)
+	defer nntpyenc.ReleaseDecoder(dec)
 	n, err := io.Copy(w, dec)
+	// Decoder may stop at =yend before DotReader reaches article terminator.
+	_, _ = io.Copy(io.Discard, bodyReader)
 	if err != nil {
 		return n, fmt.Errorf("streaming yenc decode failed: %w", err)
 	}

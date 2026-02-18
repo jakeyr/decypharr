@@ -65,10 +65,10 @@ type Manager struct {
 	startTime     time.Time
 	usenetTimeout time.Duration
 
-	rootInfo   *FileInfo
-	entry      *EntryCache
-	downloader *Downloader
-	usenet     *usenet.Usenet
+	rootInfo       *FileInfo
+	entry          *EntryCache
+	downloader     *Downloader
+	usenet         *usenet.Usenet
 
 	// Debrid speed test results storage
 	debridSpeedTestResults *xsync.Map[string, debridTypes.SpeedTestResult]
@@ -246,8 +246,6 @@ func (m *Manager) initUsenet() {
 	for i := 0; i < maxConcurrentNZB; i++ {
 		go m.nzbWorker(i)
 	}
-
-	m.logger.Info().Int("workers", maxConcurrentNZB).Msg("Usenet NZB worker pool started")
 }
 
 // initLinkService initializes the link service
@@ -299,8 +297,6 @@ func (m *Manager) nzbWorker(id int) {
 }
 
 func (m *Manager) migrate() {
-	m.logger.Info().Msg("Checking for cache files to migrate...")
-
 	// Check if migration has already been done
 	status, err := m.migrator.GetStatus()
 	if err == nil && !status.Running && status.Completed > 0 {
@@ -348,6 +344,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.logger.Info().
 		Str("version", version.GetInfo().String()).
 		Str("mount_type", string(m.config.Mount.Type)).
+		Str("notifications", fmt.Sprintf("%v", m.Notifications.IsEnabled())).
 		Str("mount_path", m.config.Mount.MountPath).
 		Msg("Starting manager")
 
@@ -464,7 +461,7 @@ func (m *Manager) GetStats() (map[string]interface{}, error) {
 		return nil, err
 	}
 
-	storageStats := m.storage.Stats()
+	diskSize := m.storage.DiskSize()
 	activeJobs := 0
 	completedJobs := 0
 	failedJobs := 0
@@ -482,7 +479,7 @@ func (m *Manager) GetStats() (map[string]interface{}, error) {
 
 	return map[string]interface{}{
 		"total_torrents": count,
-		"storage_stats":  storageStats,
+		"storage_stats":  map[string]interface{}{"total_size": diskSize},
 		"active_jobs":    activeJobs,
 		"completed_jobs": completedJobs,
 		"failed_jobs":    failedJobs,
