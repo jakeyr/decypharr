@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -23,7 +24,8 @@ type Metadata struct {
 }
 
 // UsePureGo forces the pure-Go yEnc decoder even when CGO/rapidyenc is available.
-var UsePureGo bool = false
+// Set via YENC_PURE_GO=true environment variable.
+var UsePureGo = os.Getenv("YENC_PURE_GO") == "true"
 
 // Decoder wraps an io.Reader that decodes yEnc-encoded data on the fly.
 // After reading, Meta contains the parsed yEnc header metadata.
