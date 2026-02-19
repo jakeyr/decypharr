@@ -63,6 +63,10 @@ type RepairRequest struct {
 	Mode          string   `json:"mode"`          // "detect_only" or "detect_and_repair"
 	Scope         string   `json:"scope"`         // "arr" or "managed_entries"
 	TorrentFilter string   `json:"torrentFilter"` // reserved for future scoped repair filtering
+	Recurring     bool     `json:"recurring"`
+	Schedule      string   `json:"schedule"`
+	Strategy      string   `json:"strategy"` // "per_file" or "per_torrent"
+	Workers       int      `json:"workers"`
 }
 
 type Server struct {

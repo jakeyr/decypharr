@@ -62,7 +62,7 @@ func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) e
 		Files:            make(map[string]*storage.File),
 		Tags:             []string{},
 	}
-	torrent.ContentPath = torrent.SymlinkPath()
+	torrent.ContentPath = torrent.DownloadPath()
 
 	// Add to queue
 	if err := m.queue.Add(torrent); err != nil {

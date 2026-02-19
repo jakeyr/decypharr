@@ -11,11 +11,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-co-op/gocron/v2"
 	"github.com/google/uuid"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/notifications"
@@ -36,33 +38,26 @@ type discoveredFile struct {
 }
 
 type Repair struct {
-	manager     *manager.Manager
-	autoProcess bool
-	logger      zerolog.Logger
-	workers     int
-	ctx         context.Context
+	manager   *manager.Manager
+	scheduler gocron.Scheduler
+	logger    zerolog.Logger
+	ctx       context.Context
 
 	activeContexts *xsync.Map[string, contexts]
 }
 
 const (
-	actionReinsertTorrent = "reinsert_torrent"
-	actionReacquireArr    = "arr_reacquire"
-	ScopeManagedEntries   = "managed_entries"
+	actionReacquireArr  = "arr_reacquire"
+	ScopeManagedEntries = "managed_entries"
+
+	DefaultRepairWorkers = 5
 )
 
 func New(mgr *manager.Manager) *Repair {
-	cfg := config.Get()
-	workers := max(2, runtime.NumCPU())
-	if cfg.Repair.Workers > 0 {
-		workers = cfg.Repair.Workers
-	}
-
 	r := &Repair{
 		logger:         logger.New("repair"),
-		autoProcess:    cfg.Repair.AutoProcess,
 		manager:        mgr,
-		workers:        workers,
+		scheduler:      mgr.Scheduler(),
 		ctx:            context.Background(),
 		activeContexts: xsync.NewMap[string, contexts](),
 	}
@@ -74,13 +69,6 @@ func New(mgr *manager.Manager) *Repair {
 	return r
 }
 
-func (r *Repair) Run(ctx context.Context) {
-	r.logger.Debug().Bool("auto_process", r.autoProcess).Int("workers", r.workers).Msg("Starting scheduled repair run")
-	if _, err := r.addJobWithContext(ctx, []string{}, []string{}, r.autoProcess, true); err != nil {
-		r.logger.Error().Err(err).Msg("Error running recurring repair job")
-	}
-}
-
 func (r *Repair) Stop() {
 	r.activeContexts.Range(func(_ string, value contexts) bool {
 		if value.cancel != nil {
@@ -90,11 +78,32 @@ func (r *Repair) Stop() {
 	})
 }
 
-func (r *Repair) AddJob(arrsNames []string, mediaIDs []string, autoProcess, recurrent bool) (string, error) {
-	return r.addJobWithContext(r.ctx, arrsNames, mediaIDs, autoProcess, recurrent)
+func (r *Repair) AddJob(opts manager.RepairJobOptions) (string, error) {
+	return r.addJobWithContext(r.ctx, opts)
 }
 
-func (r *Repair) addJobWithContext(ctx context.Context, arrsNames []string, mediaIDs []string, autoProcess, recurrent bool) (string, error) {
+func (r *Repair) resolveWorkers(requested int) int {
+	if requested > 0 {
+		return requested
+	}
+	return max(2, min(DefaultRepairWorkers, runtime.NumCPU()))
+}
+
+func (r *Repair) resolveStrategy(requested storage.RepairStrategy) storage.RepairStrategy {
+	if requested != "" {
+		return requested
+	}
+	return storage.RepairStrategyPerTorrent
+}
+
+func (r *Repair) addJobWithContext(ctx context.Context, opts manager.RepairJobOptions) (string, error) {
+	arrsNames := opts.Arrs
+	mediaIDs := opts.MediaIDs
+	autoProcess := opts.AutoProcess
+	recurrent := opts.Recurrent
+	schedule := opts.Schedule
+	workers := r.resolveWorkers(opts.Workers)
+	strategy := r.resolveStrategy(opts.Strategy)
 	if err := r.preRunChecks(); err != nil {
 		return "", err
 	}
@@ -112,7 +121,7 @@ func (r *Repair) addJobWithContext(ctx context.Context, arrsNames []string, medi
 	if autoProcess {
 		mode = storage.RepairModeDetectAndRepair
 	}
-	key := storage.RepairJobKey(arrs, mediaIDs, mode)
+	key := storage.RepairJobKey(recurrent, arrs, mediaIDs, mode, schedule)
 
 	if active := r.findActiveJobByKey(key); active != nil {
 		r.logger.Debug().
@@ -133,8 +142,30 @@ func (r *Repair) addJobWithContext(ctx context.Context, arrsNames []string, medi
 		UniqueKey:   key,
 		AutoProcess: autoProcess,
 		Recurrent:   recurrent,
+		Schedule:    schedule,
+		Strategy:    strategy,
+		Workers:     workers,
 		BrokenItems: make(map[string][]arr.ContentFile),
 		Stats:       storage.RepairStats{},
+	}
+
+	// For recurring jobs, save as pending and schedule via gocron
+	if recurrent && schedule != "" {
+		job.Status = storage.JobPending
+		if err := r.manager.Storage().SaveRepairJob(key, job); err != nil {
+			return "", err
+		}
+		if err := r.scheduleRecurringJob(job); err != nil {
+			// Clean up if scheduling fails
+			_ = r.manager.Storage().DeleteRepairJob(job.ID)
+			return "", fmt.Errorf("failed to schedule recurring job: %w", err)
+		}
+		r.logger.Info().
+			Str("job_id", job.ID).
+			Str("schedule", schedule).
+			Bool("recurrent", true).
+			Msg("Recurring repair job created and scheduled")
+		return job.ID, nil
 	}
 
 	if err := r.manager.Storage().SaveRepairJob(key, job); err != nil {
@@ -152,7 +183,7 @@ func (r *Repair) addJobWithContext(ctx context.Context, arrsNames []string, medi
 		Int("media_count", len(job.MediaIDs)).
 		Bool("auto_process", job.AutoProcess).
 		Bool("recurrent", job.Recurrent).
-		Int("workers", r.workers).
+		Int("workers", workers).
 		Msg("Repair job queued")
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -278,6 +309,11 @@ func (r *Repair) DeleteJobs(ids []string) {
 		if id == "" {
 			continue
 		}
+		// Unschedule recurring job from gocron if applicable
+		job := r.GetJob(id)
+		if job != nil && job.Recurrent && job.Schedule != "" {
+			r.unscheduleRecurringJob(job)
+		}
 		if ctxObj, ok := r.activeContexts.Load(id); ok && ctxObj.cancel != nil {
 			ctxObj.cancel()
 		}
@@ -304,7 +340,7 @@ func (r *Repair) runJob(ctx context.Context, job *storage.Job) {
 		Int("media_count", len(job.MediaIDs)).
 		Msg("Repair discovery started")
 
-	brokenItems, discovered, scanStats, err := r.scanBroken(ctx, job.Arrs, job.MediaIDs)
+	brokenItems, discovered, scanStats, err := r.scanBroken(ctx, job.Arrs, job.MediaIDs, job.Workers, job.Strategy)
 	if err != nil {
 		r.handleRunError(ctx, job, err)
 		return
@@ -398,7 +434,7 @@ func (r *Repair) runExecution(ctx context.Context, job *storage.Job) {
 		Str("job_id", job.ID).
 		Msg("Repair verification scan started")
 
-	remaining, _, verifyStats, verifyErr := r.scanBroken(ctx, job.Arrs, job.MediaIDs)
+	remaining, _, verifyStats, verifyErr := r.scanBroken(ctx, job.Arrs, job.MediaIDs, job.Workers, job.Strategy)
 	if verifyErr != nil {
 		r.handleRunError(ctx, job, verifyErr)
 		return
@@ -505,41 +541,8 @@ func (r *Repair) executeActions(ctx context.Context, job *storage.Job) error {
 			Msg("Repair action started")
 
 		switch action.Type {
-		case actionReinsertTorrent:
-			entry, err := r.manager.GetEntry(action.EntryID)
-			if err != nil {
-				action.Status = storage.RepairActionFailed
-				action.Error = err.Error()
-				if firstErr == nil {
-					firstErr = fmt.Errorf("reinsert failed for %s: %w", action.EntryID, err)
-				}
-				r.logger.Warn().
-					Err(err).
-					Str("job_id", job.ID).
-					Str("action_id", action.ID).
-					Str("entry_id", action.EntryID).
-					Msg("Repair action failed to fetch entry for reinsert")
-				break
-			}
-			if err := r.manager.ReinsertEntry(ctx, entry); err != nil {
-				action.Status = storage.RepairActionFailed
-				action.Error = err.Error()
-				if firstErr == nil {
-					firstErr = fmt.Errorf("reinsert failed for %s: %w", action.EntryID, err)
-				}
-				r.logger.Warn().
-					Err(err).
-					Str("job_id", job.ID).
-					Str("action_id", action.ID).
-					Str("entry_id", action.EntryID).
-					Msg("Repair action failed to reinsert entry")
-				break
-			}
-			action.Status = storage.RepairActionSucceeded
-			job.Stats.Executed++
-
 		case actionReacquireArr:
-			if err := r.processBrokenItems(ctx, job.BrokenItems); err != nil {
+			if err := r.processBrokenItems(ctx, job.BrokenItems, job.Workers); err != nil {
 				action.Status = storage.RepairActionFailed
 				action.Error = err.Error()
 				if firstErr == nil {
@@ -573,7 +576,7 @@ func (r *Repair) executeActions(ctx context.Context, job *storage.Job) error {
 	return firstErr
 }
 
-func (r *Repair) processBrokenItems(ctx context.Context, brokenItems map[string][]arr.ContentFile) error {
+func (r *Repair) processBrokenItems(ctx context.Context, brokenItems map[string][]arr.ContentFile, workers int) error {
 	if len(brokenItems) == 0 {
 		return nil
 	}
@@ -581,11 +584,11 @@ func (r *Repair) processBrokenItems(ctx context.Context, brokenItems map[string]
 	r.logger.Debug().
 		Int("arr_count", len(brokenItems)).
 		Int("broken_items", total).
-		Int("workers", r.workers).
+		Int("workers", workers).
 		Msg("Processing broken items through Arr services")
 
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(max(1, min(r.workers, len(brokenItems))))
+	g.SetLimit(max(1, min(workers, len(brokenItems))))
 
 	for arrName, items := range brokenItems {
 		items := append([]arr.ContentFile(nil), items...)
@@ -618,27 +621,27 @@ func (r *Repair) processBrokenItems(ctx context.Context, brokenItems map[string]
 	return g.Wait()
 }
 
-func (r *Repair) scanBroken(ctx context.Context, arrNames, mediaIDs []string) (map[string][]arr.ContentFile, []discoveredFile, storage.RepairStats, error) {
+func (r *Repair) scanBroken(ctx context.Context, arrNames, mediaIDs []string, workers int, strategy storage.RepairStrategy) (map[string][]arr.ContentFile, []discoveredFile, storage.RepairStats, error) {
 	brokenByArr := make(map[string][]arr.ContentFile)
 	discovered := make([]discoveredFile, 0)
 	stats := storage.RepairStats{}
 
 	if len(arrNames) == 0 {
-		return r.scanManagedEntries(ctx, mediaIDs)
+		return r.scanManagedEntries(ctx, mediaIDs, workers, strategy)
 	}
 	r.logger.Debug().
 		Int("arr_count", len(arrNames)).
 		Int("media_id_filter_count", len(mediaIDs)).
-		Int("workers", r.workers).
+		Int("workers", workers).
 		Msg("Scanning Arr services for broken items")
 
 	var mu sync.Mutex
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(max(1, min(r.workers, len(arrNames))))
+	g.SetLimit(max(1, min(workers, len(arrNames))))
 
 	for _, arrName := range arrNames {
 		g.Go(func() error {
-			arrBroken, arrDiscovered, arrStats, err := r.scanArr(gctx, arrName, mediaIDs)
+			arrBroken, arrDiscovered, arrStats, err := r.scanArr(gctx, arrName, mediaIDs, workers, strategy)
 			if err != nil {
 				return err
 			}
@@ -673,7 +676,7 @@ func (r *Repair) scanBroken(ctx context.Context, arrNames, mediaIDs []string) (m
 	return brokenByArr, discovered, stats, nil
 }
 
-func (r *Repair) scanManagedEntries(ctx context.Context, scopeIDs []string) (map[string][]arr.ContentFile, []discoveredFile, storage.RepairStats, error) {
+func (r *Repair) scanManagedEntries(ctx context.Context, scopeIDs []string, workers int, strategy storage.RepairStrategy) (map[string][]arr.ContentFile, []discoveredFile, storage.RepairStats, error) {
 	brokenByScope := make(map[string][]arr.ContentFile)
 	discovered := make([]discoveredFile, 0)
 	stats := storage.RepairStats{}
@@ -714,16 +717,16 @@ func (r *Repair) scanManagedEntries(ctx context.Context, scopeIDs []string) (map
 	r.logger.Debug().
 		Int("entry_items", len(items)).
 		Int("scope_filter_count", len(filters)).
-		Int("workers", r.workers).
+		Int("workers", workers).
 		Msg("Scanning managed entries for broken files")
 
 	var mu sync.Mutex
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(max(1, min(r.workers, len(items))))
+	g.SetLimit(max(1, min(workers, len(items))))
 
 	for _, item := range items {
 		g.Go(func() error {
-			itemBroken, itemDiscovered, itemStats := r.scanEntryItem(gctx, item)
+			itemBroken, itemDiscovered, itemStats := r.scanEntryItem(gctx, item, strategy)
 			mu.Lock()
 			if len(itemBroken) > 0 {
 				brokenByScope[ScopeManagedEntries] = append(brokenByScope[ScopeManagedEntries], itemBroken...)
@@ -754,7 +757,7 @@ func (r *Repair) scanManagedEntries(ctx context.Context, scopeIDs []string) (map
 	return brokenByScope, discovered, stats, nil
 }
 
-func (r *Repair) scanEntryItem(ctx context.Context, item *storage.EntryItem) ([]arr.ContentFile, []discoveredFile, storage.RepairStats) {
+func (r *Repair) scanEntryItem(ctx context.Context, item *storage.EntryItem, strategy storage.RepairStrategy) ([]arr.ContentFile, []discoveredFile, storage.RepairStats) {
 	stats := storage.RepairStats{}
 	broken := make([]arr.ContentFile, 0)
 	discovered := make([]discoveredFile, 0)
@@ -778,7 +781,7 @@ func (r *Repair) scanEntryItem(ctx context.Context, item *storage.EntryItem) ([]
 	}
 
 	stats.Discovered += len(filenames)
-	results := r.manager.ProbeEntryFiles(ctx, item, filenames)
+	results := r.manager.ProbeEntryFiles(ctx, item, filenames, strategy)
 	stats.Probed += len(results)
 
 	for _, result := range results {
@@ -812,7 +815,7 @@ func (r *Repair) scanEntryItem(ctx context.Context, item *storage.EntryItem) ([]
 	return broken, discovered, stats
 }
 
-func (r *Repair) scanArr(ctx context.Context, arrName string, mediaIDs []string) ([]arr.ContentFile, []discoveredFile, storage.RepairStats, error) {
+func (r *Repair) scanArr(ctx context.Context, arrName string, mediaIDs []string, workers int, strategy storage.RepairStrategy) ([]arr.ContentFile, []discoveredFile, storage.RepairStats, error) {
 	stats := storage.RepairStats{}
 	a := r.manager.Arr().Get(arrName)
 	if a == nil {
@@ -847,11 +850,11 @@ func (r *Repair) scanArr(ctx context.Context, arrName string, mediaIDs []string)
 
 	var mu sync.Mutex
 	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(max(1, min(r.workers, len(media))))
+	g.SetLimit(max(1, min(workers, len(media))))
 
 	for _, content := range media {
 		g.Go(func() error {
-			mediaBroken, mediaDiscovered, mediaStats := r.scanMedia(gctx, arrName, content)
+			mediaBroken, mediaDiscovered, mediaStats := r.scanMedia(gctx, arrName, content, strategy)
 			mu.Lock()
 			broken = append(broken, mediaBroken...)
 			discovered = append(discovered, mediaDiscovered...)
@@ -868,7 +871,7 @@ func (r *Repair) scanArr(ctx context.Context, arrName string, mediaIDs []string)
 	return dedupeContentFiles(broken), discovered, stats, nil
 }
 
-func (r *Repair) scanMedia(ctx context.Context, arrName string, media arr.Content) ([]arr.ContentFile, []discoveredFile, storage.RepairStats) {
+func (r *Repair) scanMedia(ctx context.Context, arrName string, media arr.Content, strategy storage.RepairStrategy) ([]arr.ContentFile, []discoveredFile, storage.RepairStats) {
 	stats := storage.RepairStats{}
 	broken := make([]arr.ContentFile, 0)
 	discovered := make([]discoveredFile, 0)
@@ -897,7 +900,7 @@ func (r *Repair) scanMedia(ctx context.Context, arrName string, media arr.Conten
 			fileByPath[file.TargetPath] = file
 		}
 
-		probeResults := r.manager.ProbeEntryFiles(ctx, entry, filePaths)
+		probeResults := r.manager.ProbeEntryFiles(ctx, entry, filePaths, strategy)
 		stats.Probed += len(probeResults)
 		for _, result := range probeResults {
 			switch result.Status {
@@ -936,43 +939,128 @@ func (r *Repair) scanMedia(ctx context.Context, arrName string, media arr.Conten
 }
 
 func (r *Repair) planActions(discovered []discoveredFile) []*storage.RepairAction {
-	actions := make([]*storage.RepairAction, 0)
-	torrentEntries := make(map[string]struct{})
-	hasBroken := len(discovered) > 0
+	// Torrent reinserts are already attempted during probing (ProbeEntryFiles).
+	// The only remaining repair action is arr_reacquire: delete broken files
+	// from the Arr and trigger a re-search so the Arr can re-download them.
 	hasArrBroken := false
-
 	for _, item := range discovered {
-		if item.Protocol == config.ProtocolTorrent && item.InfoHash != "" {
-			torrentEntries[item.InfoHash] = struct{}{}
-		}
 		if item.ArrName != "" {
 			hasArrBroken = true
+			break
 		}
 	}
 
-	for infohash := range torrentEntries {
-		actions = append(actions, &storage.RepairAction{
-			ID:       uuid.NewString(),
-			Type:     actionReinsertTorrent,
-			EntryID:  infohash,
-			Protocol: config.ProtocolTorrent,
-			Status:   storage.RepairActionPlanned,
-		})
+	if !hasArrBroken {
+		return nil
 	}
 
-	if hasBroken && hasArrBroken {
-		actions = append(actions, &storage.RepairAction{
+	return []*storage.RepairAction{
+		{
 			ID:       uuid.NewString(),
 			Type:     actionReacquireArr,
 			Protocol: config.ProtocolAll,
 			Status:   storage.RepairActionPlanned,
-		})
+		},
+	}
+}
+
+// --- Recurring job scheduling ---
+
+func (r *Repair) schedulerJobTag(job *storage.Job) string {
+	return "repair-recurring-" + job.ID
+}
+
+func (r *Repair) scheduleRecurringJob(job *storage.Job) error {
+	jd, err := utils.ConvertToJobDef(job.Schedule)
+	if err != nil {
+		return fmt.Errorf("invalid schedule %q: %w", job.Schedule, err)
 	}
 
-	sort.Slice(actions, func(i, j int) bool {
-		return actions[i].Type < actions[j].Type
-	})
-	return actions
+	tag := r.schedulerJobTag(job)
+	// Capture job ID for the closure
+	jobID := job.ID
+
+	_, err = r.scheduler.NewJob(jd, gocron.NewTask(func() {
+		r.runRecurringJob(jobID)
+	}), gocron.WithTags(tag))
+	if err != nil {
+		return fmt.Errorf("failed to create gocron job: %w", err)
+	}
+
+	r.logger.Info().
+		Str("job_id", job.ID).
+		Str("schedule", job.Schedule).
+		Str("gocron_tag", tag).
+		Msg("Recurring repair job scheduled")
+	return nil
+}
+
+func (r *Repair) unscheduleRecurringJob(job *storage.Job) {
+	tag := r.schedulerJobTag(job)
+	r.scheduler.RemoveByTags(tag)
+	r.logger.Info().Str("job_id", job.ID).Str("gocron_tag", tag).Msg("Recurring repair job unscheduled")
+}
+
+func (r *Repair) runRecurringJob(jobID string) {
+	// Check if already running
+	if _, active := r.activeContexts.Load(jobID); active {
+		r.logger.Warn().Str("job_id", jobID).Msg("Recurring repair job already active, skipping this trigger")
+		return
+	}
+
+	// Re-load from storage to get latest state
+	job := r.GetJob(jobID)
+	if job == nil {
+		r.logger.Warn().Str("job_id", jobID).Msg("Recurring repair job not found in storage, skipping")
+		return
+	}
+
+	// Reset job state for a fresh run
+	job.Status = storage.JobStarted
+	job.Stage = storage.JobStageQueued
+	job.StartedAt = time.Now()
+	job.CompletedAt = time.Time{}
+	job.FailedAt = time.Time{}
+	job.Error = ""
+	job.Stats = storage.RepairStats{}
+	job.BrokenItems = make(map[string][]arr.ContentFile)
+	job.Actions = nil
+	r.saveToStorage(job)
+
+	r.logger.Info().
+		Str("job_id", job.ID).
+		Str("schedule", job.Schedule).
+		Msg("Recurring repair job triggered")
+
+	runCtx, cancel := context.WithCancel(r.ctx)
+	r.activeContexts.Store(job.ID, contexts{ctx: runCtx, cancel: cancel})
+
+	r.runJob(runCtx, job)
+}
+
+// LoadRecurringJobs re-schedules all recurring jobs from storage on startup.
+func (r *Repair) LoadRecurringJobs() {
+	jobs, err := r.manager.Storage().LoadAllRepairJobs()
+	if err != nil {
+		r.logger.Error().Err(err).Msg("Failed to load repair jobs for recurring scheduling")
+		return
+	}
+
+	count := 0
+	for _, job := range jobs {
+		if !job.Recurrent || job.Schedule == "" {
+			continue
+		}
+		if err := r.scheduleRecurringJob(job); err != nil {
+			r.logger.Error().Err(err).Str("job_id", job.ID).Msg("Failed to re-schedule recurring repair job")
+			continue
+		}
+		count++
+	}
+
+	if count > 0 {
+		r.logger.Info().Int("count", count).Msg("Recurring repair jobs loaded and scheduled")
+	}
 }
 
 func (r *Repair) getArrs(arrNames []string) []string {

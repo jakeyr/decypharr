@@ -456,7 +456,7 @@ class FileBrowser {
             if (!indicator) return;
 
             if (this.state.sortBy === key) {
-                indicator.className = this.state.sortOrder === 'asc' ? 'bi bi-sort-down text-xs' : 'bi bi-sort-up text-xs';
+                indicator.className = this.state.sortOrder === 'asc' ? 'bi bi-sort-up text-xs' : 'bi bi-sort-down text-xs';
             } else {
                 indicator.className = 'bi bi-arrow-down-up text-xs';
             }
@@ -624,10 +624,10 @@ class FileBrowser {
         // Update select all checkbox state
         if (this.refs.selectAllCheckbox) {
             const allSelected = this.state.entries.length > 0 &&
-                                this.state.entries.every(entry => {
-                                    const entryId = entry.info_hash || entry.path;
-                                    return this.state.selectedEntries.has(entryId);
-                                });
+                this.state.entries.every(entry => {
+                    const entryId = entry.info_hash || entry.path;
+                    return this.state.selectedEntries.has(entryId);
+                });
             this.refs.selectAllCheckbox.checked = allSelected;
             this.refs.selectAllCheckbox.indeterminate = selectedCount > 0 && !allSelected;
         }

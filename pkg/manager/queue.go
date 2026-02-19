@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -144,7 +145,24 @@ func (q *Queue) GetTorrent(infohash string) (*storage.Entry, error) {
 }
 
 func (q *Queue) Delete(infohash string, cleanup func(t *storage.Entry) error) error {
-	return q.storage.DeleteQueued(infohash, cleanup)
+	// Wrap the cleanup function to ensure we always delete the entry files
+	deleteFile := func(entry *storage.Entry) {
+		// Delete the downloaded path if it exists
+		downloadedPath := entry.DownloadPath()
+		if downloadedPath != "" {
+			if err := os.RemoveAll(downloadedPath); err != nil {
+				q.logger.Error().Err(err).Str("path", downloadedPath).Msg("Failed to delete downloaded file")
+			}
+		}
+	}
+	finalCleanup := func(entry *storage.Entry) error {
+		deleteFile(entry)
+		if cleanup != nil {
+			return cleanup(entry)
+		}
+		return nil
+	}
+	return q.storage.DeleteQueued(infohash, finalCleanup)
 }
 
 func (q *Queue) DeleteWhere(category string, protocol config.Protocol, state storage.TorrentState, hashes []string, cleanup func(t *storage.Entry) error) error {
@@ -336,8 +354,6 @@ func (q *Queue) Close() {
 	q.cancel()
 	q.cond.Broadcast()
 }
-
-
 
 // nzbJob represents a queued NZB processing job
 type nzbJob struct {

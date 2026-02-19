@@ -41,12 +41,6 @@
                         </button>
                         <button type="button"
                             class="tab-button flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
-                            data-tab="repair">
-                            <i class="bi bi-wrench text-lg"></i>
-                            <span class="hidden sm:inline">Repair</span>
-                        </button>
-                        <button type="button"
-                            class="tab-button flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
                             data-tab="notifications">
                             <i class="bi bi-bell text-lg"></i>
                             <span class="hidden sm:inline">Notifications</span>
@@ -579,75 +573,6 @@
                         </div>
 
                         <div id="arrConfigs" class="space-y-4">
-                        </div>
-                    </div>
-                </div>
-
-                <div class="tab-content hidden" data-tab-content="repair">
-                    <div class="space-y-6">
-                        <h2 class="text-2xl font-bold flex items-center mb-6">
-                            <i class="bi bi-wrench mr-3 text-error"></i>Repair Settings
-                        </h2>
-
-                        <div>
-                            <label class="label cursor-pointer justify-start gap-3">
-                                <input type="checkbox" class="checkbox checkbox-lg checkbox-primary"
-                                    name="repair.enabled" id="repair.enabled">
-                                <div>
-                                    <span class="label-text font-medium text-lg">Enable Scheduled Repair</span>
-                                    <div class="label-text-alt">Automatically repair broken symlinks and missing files
-                                    </div>
-                                </div>
-                            </label>
-                        </div>
-
-                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-
-                            <div>
-                                <label class="label" for="repair.interval">
-                                    <span class="font-medium">Repair Interval</span>
-                                </label>
-                                <input type="text" class="input w-full" name="repair.interval" id="repair.interval"
-                                    placeholder="24h">
-                                <span class="text-sm opacity-70">How often to run repair (e.g., 24h, 1d, 03:00, or
-                                    crontab)</span>
-                            </div>
-
-                            <div>
-                                <label class="label" for="repair.workers">
-                                    <span class="font-medium">Worker Threads</span>
-                                </label>
-                                <input type="number" class="input w-full" name="repair.workers" id="repair.workers"
-                                    min="1" placeholder="40">
-                                <span class="text-sm opacity-70">Number of concurrent repair workers</span>
-                            </div>
-
-                            <div>
-                                <label class="label" for="repair.strategy">
-                                    <span class="font-medium">Repair Strategy</span>
-                                </label>
-                                <select class="select w-full" name="repair.strategy" id="repair.strategy">
-                                    <option value="per_torrent" selected>Per Torrent</option>
-                                    <option value="per_file">Per File</option>
-                                </select>
-                                <p class="text-sm opacity-70">How to handle repairs. "Per Torrent" repairs all files in
-                                    a torrent if any are broken. "Per File" repairs each file individually.</p>
-                            </div>
-                        </div>
-
-                        <div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
-
-                            <div>
-                                <label class="label cursor-pointer justify-start gap-3">
-                                    <input type="checkbox" class="checkbox checkbox-primary" name="repair.auto_process"
-                                        id="repair.auto_process">
-                                    <div>
-                                        <span class="font-medium">Auto Process</span>
-                                        <div class="label-text-alt">Automatically delete broken symlinks and re-search
-                                        </div>
-                                    </div>
-                                </label>
-                            </div>
                         </div>
                     </div>
                 </div>

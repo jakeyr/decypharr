@@ -106,9 +106,8 @@ type Config struct {
 	LogLevel string   `json:"log_level,omitempty"`
 	Debrids  []Debrid `json:"debrids,omitzero"`
 
-	Arrs        []Arr       `json:"arrs,omitzero"`
-	Repair      Repair      `json:"repair,omitzero"`
-	Usenet      Usenet      `json:"usenet,omitzero"`      // Usenet configuration
+	Arrs   []Arr  `json:"arrs,omitzero"`
+	Usenet Usenet `json:"usenet,omitzero"` // Usenet configuration
 	QBitTorrent QBitTorrent `json:"qbittorrent,omitzero"` // Deprecated: use Manager instead
 	Rclone      Rclone      `json:"rclone,omitzero"`      // Deprecated: use Mounts instead
 	Mount       Mount       `json:"mount,omitzero"`
@@ -204,10 +203,6 @@ func (c *Config) Validate() error {
 
 	if c.DownloadFolder == "" {
 		return errors.New("download folder is required")
-	}
-
-	if err := c.validateRepair(); err != nil {
-		return err
 	}
 
 	// If either debrid or usenet is enabled, at least one must be configured
@@ -452,15 +447,6 @@ func (c *Config) setDefaults() {
 
 	if c.LogLevel == "" {
 		c.LogLevel = DefaultLogLevel
-	}
-	if c.Repair.Strategy == "" {
-		c.Repair.Strategy = RepairStrategyPerTorrent
-	}
-	if c.Repair.Interval == "" {
-		c.Repair.Interval = "1h"
-	}
-	if c.Repair.Workers == 0 {
-		c.Repair.Workers = 5
 	}
 
 	// Rclone defaults

@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"github.com/go-co-op/gocron/v2"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
@@ -21,7 +22,9 @@ func (m *Manager) Repair() RepairManager {
 	return m.repair
 }
 
-
+func (m *Manager) Scheduler() gocron.Scheduler {
+	return m.scheduler
+}
 
 // Migrator returns the migrator instance
 func (m *Manager) Migrator() *Migrator {

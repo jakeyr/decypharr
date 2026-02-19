@@ -21,14 +21,24 @@ type RepairJobCounts struct {
 	Failed    int `json:"failed_jobs"`
 }
 
+type RepairJobOptions struct {
+	Arrs        []string
+	MediaIDs    []string
+	AutoProcess bool
+	Recurrent   bool
+	Schedule    string
+	Strategy    storage.RepairStrategy
+	Workers     int
+}
+
 type RepairManager interface {
-	Run(ctx context.Context)
-	AddJob(arrsNames []string, mediaIDs []string, autoProcess, recurrent bool) (string, error)
+	AddJob(opts RepairJobOptions) (string, error)
 	StopJob(id string) error
 	ProcessJob(id string) error
 	DeleteJobs(ids []string)
 	GetJobs() []*storage.Job
 	JobStats() RepairJobCounts
+	LoadRecurringJobs()
 	Stop()
 }
 
@@ -48,7 +58,7 @@ type FileProbeResult struct {
 	Reason   string          `json:"reason,omitempty"`
 }
 
-func (m *Manager) ProbeEntryFiles(ctx context.Context, item *storage.EntryItem, filenames []string) []FileProbeResult {
+func (m *Manager) ProbeEntryFiles(ctx context.Context, item *storage.EntryItem, filenames []string, strategy ...storage.RepairStrategy) []FileProbeResult {
 	if item == nil {
 		return nil
 	}
@@ -62,6 +72,10 @@ func (m *Manager) ProbeEntryFiles(ctx context.Context, item *storage.EntryItem, 
 	}
 
 	cfg := config.Get()
+	probeStrategy := storage.RepairStrategyPerTorrent
+	if len(strategy) > 0 && strategy[0] != "" {
+		probeStrategy = strategy[0]
+	}
 	files := make(map[string]*storage.File)
 
 	if len(filenames) > 0 {
@@ -182,7 +196,7 @@ func (m *Manager) ProbeEntryFiles(ctx context.Context, item *storage.EntryItem, 
 		results[name] = result
 	}
 
-	if cfg.Repair.Strategy == config.RepairStrategyPerTorrent {
+	if probeStrategy == storage.RepairStrategyPerTorrent {
 		brokenInfohashes := make(map[string]struct{})
 		for _, result := range results {
 			if result.Status == FileProbeBroken {

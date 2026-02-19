@@ -235,6 +235,11 @@ func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range) error {
 		bufferWindow = dls.chunkSize * 4
 	}
 
+	// Save original request end before read-ahead extension.
+	// Used to limit new downloader targets so probes (small reads)
+	// don't trigger full read-ahead downloads.
+	originalEnd := r.Pos + r.Size
+
 	// Extend range by read-ahead BEFORE clipping to missing.
 	// This ensures the downloader's maxOffset stays ahead of the read position,
 	// so sequential reads always have data prefetched.
@@ -253,7 +258,7 @@ func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range) error {
 		return nil
 	}
 
-	// Target end: download the full missing range
+	// Target end: download the full missing range (includes read-ahead)
 	targetEnd := r.Pos + r.Size
 
 	// Check error count
@@ -273,14 +278,23 @@ func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range) error {
 	for _, dl := range dls.dls {
 		start, offset := dl.getRange()
 		if r.Pos >= start && r.Pos < offset+window {
-			// Extend existing downloader
+			// Extend existing downloader with full read-ahead target.
+			// This is safe: the downloader is already active for this region,
+			// so this is a sequential read pattern.
 			dl.setMaxOffset(targetEnd)
 			return nil
 		}
 	}
 
-	// Start new downloader
-	return dls.newDownloaderLocked(r, targetEnd)
+	// Start new downloader with conservative target: just 1 chunk past the
+	// original request. This prevents probes (64KB reads) from triggering
+	// full read-ahead downloads (16MB). Sequential reads will extend the
+	// downloader via setMaxOffset above on subsequent calls.
+	conservativeEnd := originalEnd + dls.chunkSize
+	if conservativeEnd > targetEnd {
+		conservativeEnd = targetEnd
+	}
+	return dls.newDownloaderLocked(r, conservativeEnd)
 }
 
 // kickExistingDownloaderLocked kicks a nearby downloader to prevent idle timeout.
@@ -504,47 +518,62 @@ func (dls *Downloaders) resetCircuitLocked() {
 	dls.circuitOpenAt.Store(0)
 }
 
-// checkIdleTimeout returns true if idle timeout has been reached and stops all downloaders
+// checkIdleTimeout returns true if idle timeout has been reached and stops all downloaders.
+// It cancels the context to interrupt in-flight HTTP requests (matching StopAll behavior)
+// and waits for goroutines to exit so no zombie connections linger.
 func (dls *Downloaders) checkIdleTimeout() bool {
 	dls.mu.Lock()
-	defer dls.mu.Unlock()
 
 	// Don't timeout if already closed or already idle
 	if dls.closed {
+		dls.mu.Unlock()
 		return true
 	}
 
 	// Don't timeout if there are active waiters
 	if len(dls.waiters) > 0 {
+		dls.mu.Unlock()
 		return false
-	}
-
-	// Check if any downloaders are still running
-	activeDownloaders := 0
-	for _, dl := range dls.dls {
-		if !dl.isClosed() {
-			activeDownloaders++
-		}
 	}
 
 	// Check idle timeout
 	lastActivity := dls.lastActivity.Load()
 	if lastActivity == 0 {
+		dls.mu.Unlock()
 		return false
 	}
 
 	idleDuration := time.Since(time.Unix(0, lastActivity))
 	if idleDuration < idleTimeout {
+		dls.mu.Unlock()
 		return false
 	}
 
-	// Idle timeout reached - stop all downloaders
-	for _, dl := range dls.dls {
+	// Idle timeout reached - stop all downloaders and cancel context
+	// to interrupt in-flight HTTP requests immediately.
+	dlsCopy := make([]*downloader, len(dls.dls))
+	copy(dlsCopy, dls.dls)
+
+	for _, dl := range dlsCopy {
 		dl.stop()
 	}
 	dls.dls = nil
 	dls.untrackStreamLocked()
 	dls.idle.Store(true)
+
+	oldCancel := dls.cancel
+	// Recreate context so future Download() calls work after idle recovery.
+	dls.ctx, dls.cancel = context.WithCancel(dls.parentCtx)
+	dls.mu.Unlock()
+
+	// Cancel outside lock to interrupt in-flight Stream/HTTP calls.
+	oldCancel()
+
+	// Wait for downloader goroutines to actually exit so no zombie
+	// connections or goroutines linger after idle cleanup.
+	for _, dl := range dlsCopy {
+		dl.wg.Wait()
+	}
 
 	return true
 }

@@ -250,14 +250,38 @@ func (s *Server) handleRepairMedia(w http.ResponseWriter, r *http.Request) {
 		autoProcess = true
 	}
 
-	jobID, err := s.manager.Repair().AddJob(arrs, req.MediaIds, autoProcess, false)
+	// Validate recurring job requirements
+	if req.Recurring {
+		if req.Schedule == "" {
+			http.Error(w, "Schedule is required for recurring jobs", http.StatusBadRequest)
+			return
+		}
+		if _, err := utils.ConvertToJobDef(req.Schedule); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid schedule format: %v", err), http.StatusBadRequest)
+			return
+		}
+	}
+
+	jobID, err := s.manager.Repair().AddJob(manager.RepairJobOptions{
+		Arrs:        arrs,
+		MediaIDs:    req.MediaIds,
+		AutoProcess: autoProcess,
+		Recurrent:   req.Recurring,
+		Schedule:    req.Schedule,
+		Strategy:    storage.RepairStrategy(req.Strategy),
+		Workers:     req.Workers,
+	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to repair: %v", err), http.StatusInternalServerError)
 		return
 	}
 
+	message := "Repair job started successfully"
+	if req.Recurring {
+		message = "Recurring repair job created and scheduled"
+	}
 	utils.JSONResponse(w, map[string]string{
-		"message": "Repair job started successfully",
+		"message": message,
 		"job_id":  jobID,
 	}, http.StatusOK)
 }

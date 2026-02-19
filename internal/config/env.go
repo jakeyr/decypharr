@@ -109,8 +109,6 @@ func (c *Config) applyEnvOverrides() {
 		c.NZBUserAgent = nzbUserAgent
 	}
 
-	c.applyRepairEnvVars()
-
 	c.applyMountEnvVars()
 
 	c.applyDebridEnvVars()

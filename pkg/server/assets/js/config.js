@@ -90,9 +90,6 @@ class ConfigManager {
             config.arrs.forEach(arr => this.addArrConfig(arr));
         }
 
-        // Load repair config
-        this.populateRepairSettings(config.repair);
-
         // Load rclone config
         this.populateMountSettings(config.mount);
 
@@ -143,23 +140,6 @@ class ConfigManager {
 
         actionSelect.addEventListener('change', toggleDownloaderOptions);
         toggleDownloaderOptions();
-    }
-
-    populateRepairSettings(repairConfig) {
-        if (!repairConfig) return;
-
-        const fields = ['enabled', 'interval', 'workers', 'strategy', 'auto_process'];
-
-        fields.forEach(field => {
-            const element = document.querySelector(`[name="repair.${field}"]`);
-            if (element && repairConfig[field] !== undefined) {
-                if (element.type === 'checkbox') {
-                    element.checked = repairConfig[field];
-                } else {
-                    element.value = repairConfig[field];
-                }
-            }
-        });
     }
 
     populateNotificationSettings(notificationsConfig) {
@@ -1067,13 +1047,6 @@ class ConfigManager {
             }
         });
 
-        // Validate repair settings
-        if (config.repair.enabled) {
-            if (!config.repair.interval) {
-                errors.push('Repair interval is required when repair is enabled');
-            }
-        }
-
         if (config.mount.type === "") {
             errors.push('Mount type is required when ');
         }
@@ -1126,9 +1099,6 @@ class ConfigManager {
 
             // Arr configurations
             arrs: this.collectArrConfigs(),
-
-            // Repair configuration
-            repair: this.collectRepairConfig(),
 
             // Mount configuration
             mount: this.collectMountConfig(),
@@ -1254,16 +1224,6 @@ class ConfigManager {
         }
 
         return arrs;
-    }
-
-    collectRepairConfig() {
-        return {
-            enabled: document.querySelector('[name="repair.enabled"]').checked,
-            interval: document.querySelector('[name="repair.interval"]').value,
-            strategy: document.querySelector('[name="repair.strategy"]').value,
-            workers: parseInt(document.querySelector('[name="repair.workers"]').value) || 1,
-            auto_process: document.querySelector('[name="repair.auto_process"]').checked
-        };
     }
 
     collectMountConfig() {

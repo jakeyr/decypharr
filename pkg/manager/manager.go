@@ -600,10 +600,6 @@ func (m *Manager) trackAvailableSlots(ctx context.Context) {
 	m.clients.Range(func(name string, client debrid.Client) bool {
 		slots, err := client.GetAvailableSlots()
 		if err != nil {
-			m.logger.Warn().
-				Err(err).
-				Str("client", name).
-				Msg("Failed to get available slots from debrid client")
 			return true
 		}
 		availableSlots[name] = slots

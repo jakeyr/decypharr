@@ -15,6 +15,12 @@ type JobStatus string
 type RepairMode string
 type JobStage string
 type RepairActionStatus string
+type RepairStrategy string
+
+const (
+	RepairStrategyPerFile    RepairStrategy = "per_file"
+	RepairStrategyPerTorrent RepairStrategy = "per_torrent"
+)
 
 const (
 	JobStarted    JobStatus = "started"
@@ -83,6 +89,9 @@ type Job struct {
 	FailedAt    time.Time                    `json:"failed_at"`
 	AutoProcess bool                         `json:"auto_process"`
 	Recurrent   bool                         `json:"recurrent"`
+	Schedule    string                       `json:"schedule,omitempty"`
+	Strategy    RepairStrategy               `json:"strategy,omitempty"`
+	Workers     int                          `json:"workers,omitempty"`
 	Error       string                       `json:"error"`
 
 	UpdatedAt time.Time       `json:"updated_at"`
@@ -122,12 +131,16 @@ func (j *Job) DiscordContext() string {
 	)
 }
 
-func RepairJobKey(arrs, mediaIDs []string, mode RepairMode) string {
+func RepairJobKey(recurrent bool, arrs, mediaIDs []string, mode RepairMode, schedule string) string {
 	arrCopy := append([]string(nil), arrs...)
 	mediaCopy := append([]string(nil), mediaIDs...)
 	sort.Strings(arrCopy)
 	sort.Strings(mediaCopy)
-	return fmt.Sprintf("%s|%s|%s", strings.Join(arrCopy, ","), strings.Join(mediaCopy, ","), mode)
+	prefix := "oneoff"
+	if recurrent {
+		prefix = "recurring"
+	}
+	return fmt.Sprintf("%s|%s|%s|%s|%s", prefix, strings.Join(arrCopy, ","), strings.Join(mediaCopy, ","), mode, schedule)
 }
 
 func (s *Storage) SaveRepairJob(key string, job *Job) error {

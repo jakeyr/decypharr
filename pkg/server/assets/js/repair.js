@@ -17,14 +17,13 @@ class RepairManager {
         this.refs = {
             repairForm: document.getElementById('repairForm'),
             repairScope: document.getElementById('repairScope'),
-            repairScopeDescription: document.getElementById('repairScopeDescription'),
             arrSelect: document.getElementById('arrSelect'),
-            arrHelpText: document.getElementById('arrHelpText'),
+            // arrHelpText: removed in new design or implicitly handled
             mediaIds: document.getElementById('mediaIds'),
-            mediaHelpText: document.getElementById('mediaHelpText'),
+            // mediaHelpText: removed/changed
             repairMode: document.getElementById('repairMode'),
-            repairModeDescription: document.getElementById('repairModeDescription'),
             submitBtn: document.getElementById('submitRepair'),
+            repairWorkers: document.getElementById('repairWorkers'),
 
             jobsTableBody: document.getElementById('jobsTableBody'),
             jobsPagination: document.getElementById('jobsPagination'),
@@ -71,7 +70,16 @@ class RepairManager {
             clearFiltersBtn: document.getElementById('clearFiltersBtn'),
 
             processJobBtn: document.getElementById('processJobBtn'),
-            stopJobBtn: document.getElementById('stopJobBtn')
+            stopJobBtn: document.getElementById('stopJobBtn'),
+
+            repairStrategy: document.getElementById('repairStrategy'),
+            repairWorkers: document.getElementById('repairWorkers'),
+            recurringToggle: document.getElementById('recurringToggle'),
+            scheduleContainer: document.getElementById('scheduleContainer'),
+            scheduleInput: document.getElementById('scheduleInput'),
+            modalJobStrategy: document.getElementById('modalJobStrategy'),
+            modalJobWorkers: document.getElementById('modalJobWorkers'),
+            modalJobSchedule: document.getElementById('modalJobSchedule')
         };
 
         this.init();
@@ -119,52 +127,82 @@ class RepairManager {
         return this.getSelectedScope() === 'managed_entries';
     }
 
-    syncScopeUI() {
-        const managedEntriesScope = this.isManagedEntriesScope();
+    setScope(scope) {
+        if (this.refs.repairScope) {
+            this.refs.repairScope.value = scope;
+            this.syncScopeUI();
+        }
+    }
 
-        if (this.refs.arrSelect) {
-            this.refs.arrSelect.disabled = managedEntriesScope;
+    setMode(mode) {
+        if (this.refs.repairMode) {
+            this.refs.repairMode.value = mode;
+            this.syncModeUI();
+        }
+    }
+
+    syncScopeUI() {
+        const scope = this.getSelectedScope();
+        const managedEntriesScope = scope === 'managed_entries';
+
+        // Update cards
+        document.querySelectorAll('.selection-card').forEach(card => {
+            const isSelected = card.dataset.value === scope;
+            card.classList.toggle('active', isSelected);
+            card.classList.toggle('border-primary', isSelected && scope === 'arr');
+            card.classList.toggle('border-secondary', isSelected && scope === 'managed_entries');
+
+            // Toggle check icon
+            const checkIcon = card.querySelector('.check-icon');
+            if (checkIcon) checkIcon.classList.toggle('hidden', !isSelected);
+        });
+
+        // Update Arr Select visibility/state
+        const arrContainer = document.getElementById('arrSelectContainer');
+        if (arrContainer) {
             if (managedEntriesScope) {
-                this.refs.arrSelect.value = '';
+                arrContainer.classList.add('opacity-50', 'pointer-events-none');
+                if (this.refs.arrSelect) {
+                    this.refs.arrSelect.value = '';
+                    this.refs.arrSelect.disabled = true;
+                }
+            } else {
+                arrContainer.classList.remove('opacity-50', 'pointer-events-none');
+                if (this.refs.arrSelect) this.refs.arrSelect.disabled = false;
             }
         }
-        if (this.refs.arrHelpText) {
-            this.refs.arrHelpText.textContent = managedEntriesScope
-                ? 'Arr selection is disabled for managed-entry scans.'
-                : 'Choose which Arr service to repair';
-        }
+
+        // Update inputs
         if (this.refs.mediaIds) {
-            this.refs.mediaIds.placeholder = managedEntriesScope ? 'optional: infohash, entry name' : '123, 456, 789';
+            this.refs.mediaIds.placeholder = managedEntriesScope ? 'optional: infohash, entry name' : '123, 456';
         }
-        if (this.refs.mediaHelpText) {
-            this.refs.mediaHelpText.textContent = managedEntriesScope
-                ? 'Optional managed-entry filters (infohash or entry name), comma-separated. Leave empty for all entries.'
-                : 'Enter specific TV DB IDs (Sonarr) or TM DB IDs (Radarr), comma-separated. Leave empty for all media.';
-        }
-        if (this.refs.repairScopeDescription) {
-            this.refs.repairScopeDescription.textContent = managedEntriesScope
-                ? 'Managed-entry scope probes Decypharr tracked entries directly, without Arr metadata.'
-                : 'Arr media scope discovers files through Arr-managed library items.';
+
+        const mediaHelpText = document.getElementById('mediaHelpText');
+        if (mediaHelpText) {
+            mediaHelpText.textContent = managedEntriesScope
+                ? 'Optional: infohash or entry name'
+                : 'TVDB/TMDB IDs, comma-separated';
         }
     }
 
     syncModeUI() {
-        if (!this.refs.repairModeDescription || !this.refs.submitBtn) return;
         const mode = this.refs.repairMode.value;
-        const managedEntriesScope = this.isManagedEntriesScope();
+        const isRepair = mode === 'detect_and_repair';
 
-        if (mode === 'detect_and_repair') {
-            this.refs.repairModeDescription.textContent =
-                managedEntriesScope
-                    ? 'Runs detect + repair on managed entries (reinsert actions where available), then verifies.'
-                    : 'Runs full workflow: detect broken files, execute repair actions, then verify.';
-            this.refs.submitBtn.innerHTML = '<i class="bi bi-wrench-adjustable mr-2"></i>Start Detect + Repair';
-            return;
+        // Update mode cards
+        document.querySelectorAll('.mode-card').forEach(card => {
+            const isSelected = card.dataset.value === mode;
+            card.classList.toggle('active', isSelected);
+            card.classList.toggle('border-info', isSelected && mode === 'detect_only');
+            card.classList.toggle('border-warning', isSelected && mode === 'detect_and_repair');
+        });
+
+        // Update submit button
+        if (this.refs.submitBtn) {
+            const icon = isRepair ? 'bi-wrench-adjustable' : 'bi-search';
+            const text = isRepair ? 'Start Detect + Repair' : 'Start Detect Only';
+            this.refs.submitBtn.innerHTML = `<i class="bi ${icon} text-xl"></i><span>${text}</span>`;
         }
-
-        this.refs.repairModeDescription.textContent =
-            'Detect-only scans and reports broken files without changing anything.';
-        this.refs.submitBtn.innerHTML = '<i class="bi bi-search mr-2"></i>Start Detect Only';
     }
 
     async loadArrInstances() {
@@ -194,17 +232,26 @@ class RepairManager {
         const arr = this.refs.arrSelect.value;
         const mediaIdsValue = this.refs.mediaIds.value.trim();
         const mode = this.refs.repairMode.value || 'detect_only';
+        const schedule = this.refs.scheduleInput?.value.trim() || '';
+        const recurring = schedule.length > 0;
 
         const mediaIds = mediaIdsValue
             ? mediaIdsValue.split(',').map((id) => id.trim()).filter(Boolean)
             : [];
+
+        const strategy = this.refs.repairStrategy?.value || 'per_torrent';
+        const workers = parseInt(this.refs.repairWorkers?.value, 10) || 5;
 
         const requestBody = {
             arr,
             mediaIds: mediaIds.length > 0 ? mediaIds : null,
             scope,
             mode,
-            autoProcess: mode === 'detect_and_repair'
+            autoProcess: mode === 'detect_and_repair',
+            strategy,
+            workers,
+            recurring,
+            schedule
         };
 
         try {
@@ -381,6 +428,11 @@ class RepairManager {
         const canDelete = !['started', 'processing'].includes(job.status);
 
         const arrs = (job.arrs && job.arrs.length > 0) ? job.arrs : ['managed_entries'];
+        const isRecurring = job.recurrent && job.schedule;
+        const typeBadge = isRecurring
+            ? `<div class="badge badge-info badge-sm tooltip" data-tip="${window.decypharrUtils.escapeHtml(job.schedule || '')}"><i class="bi bi-arrow-repeat mr-1"></i>Recurring</div>`
+            : `<div class="badge badge-ghost badge-sm">One-off</div>`;
+
         row.innerHTML = `
             <td>
                 <label class="cursor-pointer">
@@ -403,6 +455,7 @@ class RepairManager {
             </td>
             <td><div class="badge ${status.class} badge-sm">${status.text}</div></td>
             <td><div class="badge ${stage.class} badge-sm">${stage.text}</div></td>
+            <td>${typeBadge}</td>
             <td><div class="badge badge-outline badge-sm">${modeText}</div></td>
             <td>
                 <div class="text-xs font-mono leading-tight">
@@ -411,7 +464,7 @@ class RepairManager {
             </td>
             <td>
                 <div class="flex gap-1">
-                    ${job.status === 'pending' ? `
+                    ${job.status === 'pending' && !isRecurring ? `
                         <button class="btn btn-primary btn-xs process-job" data-job-id="${job.id}" title="Execute pending run">
                             <i class="bi bi-play-fill"></i>
                         </button>` : ''}
@@ -530,6 +583,16 @@ class RepairManager {
         this.refs.modalJobMediaIds.textContent = (job.media_ids && job.media_ids.length > 0) ? job.media_ids.join(', ') : 'All media';
         this.refs.modalJobMode.textContent = this.formatMode(job.mode, job.auto_process);
         this.refs.modalJobAutoProcess.textContent = job.auto_process ? 'Yes' : 'No';
+        if (this.refs.modalJobStrategy) {
+            const strategyMap = { per_torrent: 'Per Torrent', per_file: 'Per File' };
+            this.refs.modalJobStrategy.textContent = strategyMap[job.strategy] || job.strategy || 'Per Torrent';
+        }
+        if (this.refs.modalJobWorkers) {
+            this.refs.modalJobWorkers.textContent = job.workers || '5';
+        }
+        if (this.refs.modalJobSchedule) {
+            this.refs.modalJobSchedule.textContent = (job.recurrent && job.schedule) ? job.schedule : 'N/A';
+        }
 
         this.setStat(this.refs.modalStatDiscovered, stats.discovered);
         this.setStat(this.refs.modalStatProbed, stats.probed);

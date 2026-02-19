@@ -488,7 +488,8 @@ func (e *Entry) IsValid() bool {
 	return activePlacement.IsValid()
 }
 
-func (e *Entry) SymlinkPath() string {
+// DownloadPath returns the expected download/symlink path for this entry
+func (e *Entry) DownloadPath() string {
 	return filepath.Join(e.SavePath, utils.RemoveExtension(e.Name))
 }
 

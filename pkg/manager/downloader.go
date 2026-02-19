@@ -41,11 +41,11 @@ func NewDownloadManager(manager *Manager) *Downloader {
 		strmURL = fmt.Sprintf("http://%s:%s", bindAddress, cfg.Port)
 	}
 	return &Downloader{
-		manager:     manager,
-		strmURL:     strmURL,
-		mountPath:   cfg.Mount.MountPath,
-		logger:      manager.logger.With().Str("component", "downloader").Logger(),
-		dest:        cfg.DownloadFolder,
+		manager:      manager,
+		strmURL:      strmURL,
+		mountPath:    cfg.Mount.MountPath,
+		logger:       manager.logger.With().Str("component", "downloader").Logger(),
+		dest:         cfg.DownloadFolder,
 		maxDownloads: cfg.MaxDownloads,
 	}
 }
@@ -96,11 +96,11 @@ func (d *Downloader) process(entry *storage.Entry, mountPath string) error {
 
 func (d *Downloader) markAsCompleted(entry *storage.Entry) {
 	// Mark as completed
-	entry.MarkAsCompleted(entry.SymlinkPath())
+	entry.MarkAsCompleted(entry.DownloadPath())
 	_ = d.manager.queue.Update(entry)
 
 	// Send notification
-	msg := fmt.Sprintf("Download completed: %s [%s] -> %s", entry.Name, entry.Category, entry.SymlinkPath())
+	msg := fmt.Sprintf("Download completed: %s [%s] -> %s", entry.Name, entry.Category, entry.DownloadPath())
 	d.manager.Notifications.Notify(notifications.Event{
 		Type:    config.EventDownloadComplete,
 		Status:  "success",
@@ -134,7 +134,7 @@ func (d *Downloader) markAsError(entry *storage.Entry, err error) {
 // processSymlink creates symlinks for torrent files
 func (d *Downloader) processSymlink(entry *storage.Entry, mountPath string) error {
 	files := entry.GetActiveFiles()
-	torrentSymlinkPath := entry.SymlinkPath()
+	torrentSymlinkPath := entry.DownloadPath()
 	d.logger.Info().Str("mount_path", mountPath).Msgf("Creating symlinks for %d files in %s", len(files), torrentSymlinkPath)
 
 	// Create symlink directory
@@ -229,7 +229,7 @@ func (d *Downloader) processTorrentDownload(entry *storage.Entry) error {
 	for _, file := range files {
 		totalSize += file.Size
 	}
-	downloadedFolder := entry.SymlinkPath()
+	downloadedFolder := entry.DownloadPath()
 	if err := os.MkdirAll(downloadedFolder, os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create download directory: %s: %v", downloadedFolder, err)
 	}
@@ -300,7 +300,7 @@ func (d *Downloader) processUsenetDownload(entry *storage.Entry) error {
 	files := entry.GetActiveFiles()
 	d.logger.Info().Msgf("Downloading %d NZB files via usenet...", len(files))
 
-	downloadedFolder := entry.SymlinkPath()
+	downloadedFolder := entry.DownloadPath()
 	if err := os.MkdirAll(downloadedFolder, os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create download directory: %s: %v", downloadedFolder, err)
 	}
@@ -373,7 +373,7 @@ func (d *Downloader) processStrm(torrent *storage.Entry) error {
 	files := torrent.GetActiveFiles()
 	d.logger.Info().Msgf("Creating .strm for %d files ...", len(files))
 
-	torrentSymlinkPath := torrent.SymlinkPath()
+	torrentSymlinkPath := torrent.DownloadPath()
 
 	// Create symlink directory
 	err := os.MkdirAll(torrentSymlinkPath, os.ModePerm)

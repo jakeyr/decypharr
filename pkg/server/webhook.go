@@ -2,8 +2,10 @@ package server
 
 import (
 	"cmp"
-	json "github.com/bytedance/sonic"
 	"net/http"
+
+	json "github.com/bytedance/sonic"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
 func (s *Server) handleTautulli(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +40,10 @@ func (s *Server) handleTautulli(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mediaId := cmp.Or(payload.TmdbID, payload.TvdbID)
-	if _, err := s.manager.Repair().AddJob([]string{}, []string{mediaId}, payload.AutoProcess, false); err != nil {
+	if _, err := s.manager.Repair().AddJob(manager.RepairJobOptions{
+		MediaIDs:    []string{mediaId},
+		AutoProcess: payload.AutoProcess,
+	}); err != nil {
 		http.Error(w, "Failed to add job: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

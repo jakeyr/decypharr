@@ -54,7 +54,7 @@ func (m *Manager) AddNewNZB(ctx context.Context, req *ImportRequest) (string, er
 		Tags:             []string{},
 	}
 
-	entry.ContentPath = entry.SymlinkPath()
+	entry.ContentPath = entry.DownloadPath()
 	_ = entry.AddUsenetProvider(meta)
 	entry.ActiveProvider = "usenet"
 	entry.UpdatedAt = time.Now()
@@ -242,7 +242,7 @@ func (m *Manager) syncNZBs(ctx context.Context) error {
 			Files:            make(map[string]*storage.File),
 			Tags:             []string{},
 		}
-		entry.ContentPath = entry.SymlinkPath()
+		entry.ContentPath = entry.DownloadPath()
 
 		// AddOrUpdate placement
 		_ = entry.AddUsenetProvider(meta)

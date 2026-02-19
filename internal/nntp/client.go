@@ -107,7 +107,6 @@ func NewClient(cfg *config.Config) (*Client, error) {
 	sort.Slice(providers, func(i, j int) bool {
 		return providers[i].Priority < providers[j].Priority
 	})
-
 	pools := make(map[string]*ProviderPool)
 	for _, p := range providers {
 		pp := &ProviderPool{

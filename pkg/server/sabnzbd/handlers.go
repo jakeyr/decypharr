@@ -537,7 +537,7 @@ func (s *SABnzbd) getHistory(ctx context.Context, limit int, nzoIDs []string) Hi
 			Category:    item.Category,
 			FailMessage: item.LastError,
 			Bytes:       item.Size,
-			Storage:     item.SymlinkPath(),
+			Storage:     item.DownloadPath(),
 		}
 		slots = append(slots, slot)
 	}
@@ -551,7 +551,7 @@ func (s *SABnzbd) getHistory(ctx context.Context, limit int, nzoIDs []string) Hi
 			Category:    item.Category,
 			FailMessage: item.LastError,
 			Bytes:       item.Size,
-			Storage:     item.SymlinkPath(),
+			Storage:     item.DownloadPath(),
 		}
 		slots = append(slots, slot)
 	}

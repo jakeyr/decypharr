@@ -207,21 +207,9 @@ func (m *Manager) StartWorker(ctx context.Context) error {
 		}
 	}
 
-	// Repair runner job
-	repairCfg := m.config.Repair
-	if repairCfg.Enabled && repairCfg.Interval != "" {
-		if jd, err := utils.ConvertToJobDef(repairCfg.Interval); err != nil {
-			m.logger.Error().Err(err).Msg("Failed to convert repair runner interval to job definition")
-		} else {
-			// Schedule the job
-			if _, err := m.scheduler.NewJob(jd, gocron.NewTask(func() {
-				m.repair.Run(ctx)
-			}), gocron.WithContext(ctx)); err != nil {
-				m.logger.Error().Err(err).Msg("Failed to create repair runner job")
-			} else {
-				m.logger.Debug().Msgf("Repair runner job scheduled for every %s", repairCfg.Interval)
-			}
-		}
+	// Load recurring repair jobs from storage
+	if m.repair != nil {
+		m.repair.LoadRecurringJobs()
 	}
 
 	// Start the scheduler
