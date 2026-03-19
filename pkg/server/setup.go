@@ -112,13 +112,18 @@ type SetupCompleteRequest struct {
 
 // setupCompleteHandler handles the complete setup in a single request
 func (s *Server) setupCompleteHandler(w http.ResponseWriter, r *http.Request) {
+	cfg := config.Get()
+	// Prevent re-running setup once it has already been completed
+	if err := cfg.SetupComplete(); err == nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	var req SetupCompleteRequest
 	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.sendSetupError(w, "Invalid request format", err)
 		return
 	}
-
-	cfg := config.Get()
 
 	hasDebrid := !req.Debrid.Skip && req.Debrid.Provider != "" && req.Debrid.APIKey != ""
 	hasUsenet := !req.Usenet.Skip && req.Usenet.Host != "" && req.Usenet.Port > 0 && req.Usenet.Username != "" && req.Usenet.Password != ""

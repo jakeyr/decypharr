@@ -139,21 +139,24 @@ func New(mgr *manager.Manager) *Server {
 			r.Mount(path, handler)
 		}
 
-		//logs
-		r.Get("/logs", s.getLogs) // deprecated, use /debug/logs
+		r.Group(func(r chi.Router) {
+			r.Use(s.authMiddleware)
 
-		r.Route("/debug", func(r chi.Router) {
-			r.Get("/stats", s.stats.Handler())
-			r.Post("/speedtest", s.handleSpeedTest)
-			r.Get("/logs", s.getLogs)
-			r.Get("/logs/rclone", s.getRcloneLogs)
-			r.Get("/ingests", s.handleIngests)
-			r.Get("/ingests/{debrid}", s.handleIngestsByDebrid)
+			//logs
+			r.Get("/logs", s.getLogs) // deprecated, use /debug/logs
+
+			r.Route("/debug", func(r chi.Router) {
+				r.Get("/stats", s.stats.Handler())
+				r.Post("/speedtest", s.handleSpeedTest)
+				r.Get("/logs", s.getLogs)
+				r.Get("/logs/rclone", s.getRcloneLogs)
+				r.Get("/ingests", s.handleIngests)
+				r.Get("/ingests/{debrid}", s.handleIngestsByDebrid)
+			})
 		})
 
 		//webhooks
 		r.Post("/webhooks/tautulli", s.handleTautulli)
-
 	})
 	s.router = r
 	return s

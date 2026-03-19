@@ -31,6 +31,10 @@ type Manager struct {
 type fileEntry struct {
 	item     *CacheItem
 	refCount atomic.Int32
+	// deleted is set to true by ReleaseFile before the entry is removed from the
+	// map. GetFile checks this after incrementing refCount so it can detect and
+	// undo a concurrent deletion without holding a coarse lock.
+	deleted atomic.Bool
 }
 
 // NewManager creates a new VFS manager
@@ -63,10 +67,16 @@ func (m *Manager) GetManager() *manager.Manager {
 func (m *Manager) GetFile(info *manager.FileInfo) (*StreamingFile, error) {
 	key := buildFileKey(info.Parent(), info.Name())
 
-	// Fast path: existing file
+	// Fast path: existing file.
+	// Increment refCount first, then verify the entry wasn't concurrently deleted
+	// by ReleaseFile between our Load and the Add. If it was, undo the increment
+	// and fall through to the slow path which will create a fresh entry.
 	if entry, ok := m.files.Load(key); ok {
 		entry.refCount.Add(1)
-		return NewStreamingFile(entry.item), nil
+		if !entry.deleted.Load() {
+			return NewStreamingFile(entry.item), nil
+		}
+		entry.refCount.Add(-1)
 	}
 
 	// Get or create cache item
@@ -97,6 +107,10 @@ func (m *Manager) ReleaseFile(info *manager.FileInfo) {
 
 	if entry, ok := m.files.Load(key); ok {
 		if entry.refCount.Add(-1) <= 0 {
+			// Mark deleted before removing from the map so that any concurrent
+			// GetFile that already loaded this entry can detect the deletion and
+			// undo its refCount increment rather than using a stale entry.
+			entry.deleted.Store(true)
 			m.files.Delete(key)
 			m.activeFiles.Add(-1)
 			// Downloaders are stopped in CacheItem.Release() when opens reaches 0.

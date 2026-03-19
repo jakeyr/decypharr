@@ -767,11 +767,12 @@ func (item *CacheItem) WriteAtNoOverwrite(p []byte, off int64) (n, skipped int, 
 	n = len(p)
 	skipped = 0
 
-	// Find all present/absent regions
+	// FindAll is read-only; hold RLock for its duration instead of copying the
+	// ranges slice first. The lock window is O(log k) where k is typically 1–3
+	// during active streaming, so extending the hold is negligible.
 	item.metaMu.RLock()
-	rsSnapshot := append(ranges.Ranges(nil), item.info.Rs...)
+	frs := item.info.Rs.FindAll(writeRange)
 	item.metaMu.RUnlock()
-	frs := rsSnapshot.FindAll(writeRange)
 
 	// pread/pwrite are thread-safe, so RLock suffices to guard against Close() nil-ing the file.
 	// This allows reads and writes to proceed concurrently on the same file.
@@ -796,6 +797,13 @@ func (item *CacheItem) WriteAtNoOverwrite(p []byte, off int64) (n, skipped int, 
 		}
 	}
 	item.fileMu.RUnlock()
+
+	// Advise the kernel to evict written pages from the page cache. The data is
+	// already durable on disk (sparse file), so keeping it in RAM wastes memory
+	// that would otherwise buffer upcoming reads or OS readahead.
+	if skipped < n {
+		dropFileCache(f, off, int64(len(p)))
+	}
 
 	// Mark range as present
 	item.metaMu.Lock()

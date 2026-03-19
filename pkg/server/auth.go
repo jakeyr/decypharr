@@ -29,6 +29,11 @@ func (s *Server) verifyAuth(username, password string) bool {
 
 func (s *Server) skipAuthHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
+	// Only allow skipping auth during initial setup (before setup is complete)
+	if err := cfg.SetupComplete(); err == nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	cfg.UseAuth = false
 	if err := cfg.Save(); err != nil {
 		s.logger.Error().Err(err).Msg("failed to save config")

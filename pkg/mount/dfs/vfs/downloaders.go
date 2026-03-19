@@ -37,6 +37,10 @@ const (
 	noProgressTimeout = 45 * time.Second
 	// noProgressCheckInterval is how often stall detection checks for forward progress.
 	noProgressCheckInterval = 1 * time.Second
+	// maxChunkSizeMultiplier caps adaptive chunk growth at this multiple of baseChunkSize.
+	// Without a cap, binary doubling eventually produces chunk sizes in the GB range,
+	// causing oversized HTTP range requests that are wasteful on seeks.
+	maxChunkSizeMultiplier = 16
 )
 
 // Downloaders coordinates multiple concurrent downloads to a cache item
@@ -284,11 +288,14 @@ func (dls *Downloaders) Download(ctx context.Context, r ranges.Range) error {
 	}
 }
 
-// removeWaiterLocked removes a waiter by its channel (call with lock held)
+// removeWaiterLocked removes a waiter by its channel (call with lock held).
+// Order is not significant, so swap-with-last is used for O(1) removal.
 func (dls *Downloaders) removeWaiterLocked(errChan chan<- error) {
 	for i, w := range dls.waiters {
 		if w.errChan == errChan {
-			dls.waiters = append(dls.waiters[:i], dls.waiters[i+1:]...)
+			last := len(dls.waiters) - 1
+			dls.waiters[i] = dls.waiters[last]
+			dls.waiters = dls.waiters[:last]
 			dls.waiterCount.Add(-1)
 			return
 		}
@@ -773,7 +780,7 @@ func (dls *Downloaders) currentKickerInterval() time.Duration {
 
 // startKicker starts a background safety-net goroutine that periodically checks
 // waiters and handles idle timeout. The primary notification path is direct
-// kickWaiters() calls from cacheWriter.Write(); this timer is only a fallback.
+// kickWaiters() calls from cacheWriter.Write(); this ticker is only a fallback.
 func (dls *Downloaders) startKicker() {
 	ctx := dls.ctx
 	dls.kickerDone = make(chan struct{})
@@ -782,21 +789,23 @@ func (dls *Downloaders) startKicker() {
 		defer dls.wg.Done()
 		defer close(dls.kickerDone)
 
+		interval := dls.currentKickerInterval()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
 		for {
-			timer := time.NewTimer(dls.currentKickerInterval())
 			select {
-			case <-timer.C:
+			case <-ticker.C:
+				// Adjust cadence if waiter presence changed since last tick.
+				if next := dls.currentKickerInterval(); next != interval {
+					interval = next
+					ticker.Reset(next)
+				}
 				dls.kickWaiters()
 				if dls.checkIdleTimeout() {
 					return
 				}
 			case <-ctx.Done():
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
 				return
 			}
 		}
@@ -1083,8 +1092,12 @@ func (dl *downloader) adjustChunkSize(chunkLen, written int64, success bool) {
 		return
 	}
 
-	// Double chunk size on successful download to quickly ramp up on good connections, but reset to base size on failures.
+	// Double chunk size on successful download to quickly ramp up on good connections,
+	// but cap at maxChunkSizeMultiplier × base to avoid oversized HTTP range requests on seeks.
 	next := dl.currentChunkSize * 2
+	if maxChunk := dl.baseChunkSize * maxChunkSizeMultiplier; next > maxChunk {
+		next = maxChunk
+	}
 	if next <= 0 {
 		next = dl.baseChunkSize
 	}
