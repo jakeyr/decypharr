@@ -1,14 +1,11 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
-const docsChannel = process.env.PUBLIC_DOCS_CHANNEL || 'stable';
-const docsBasePrefix = process.env.PUBLIC_DOCS_BASE_PATH || '/';
-const docsChannelBasePath =
-	process.env.PUBLIC_DOCS_CHANNEL_BASE_PATH || buildChannelBasePath(docsBasePrefix, docsChannel);
+const docsBasePath = normalizeBasePath(process.env.PUBLIC_DOCS_BASE_PATH || '/');
 
 // https://astro.build/config
 export default defineConfig({
-	base: docsChannelBasePath,
+	base: docsBasePath,
 	integrations: [
 		starlight({
 			title: 'Decypharr',
@@ -83,19 +80,8 @@ export default defineConfig({
 				},
 			],
 		}),
-		],
-	});
-
-function buildChannelBasePath(basePath, channel) {
-	const normalizedBase = normalizeBasePath(basePath);
-	const normalizedChannel = sanitizeSegment(channel);
-
-	if (!normalizedChannel) {
-		return normalizedBase;
-	}
-
-	return `${normalizedBase}${normalizedChannel}/`.replace(/\/{2,}/g, '/');
-}
+	],
+});
 
 function normalizeBasePath(value) {
 	if (!value) {
@@ -113,12 +99,4 @@ function normalizeBasePath(value) {
 	}
 
 	return normalized.replace(/\/{2,}/g, '/');
-}
-
-function sanitizeSegment(value) {
-	if (!value) {
-		return '';
-	}
-
-	return value.replace(/^\/+/, '').replace(/\/+$/, '');
 }

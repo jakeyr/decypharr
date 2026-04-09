@@ -385,7 +385,6 @@ class DecypharrUtils {
 
             const data = await response.json();
             const versionBadge = document.getElementById('version-badge');
-            const docsLink = document.getElementById('docs-link');
 
             if (versionBadge) {
                 versionBadge.innerHTML = `
@@ -404,11 +403,6 @@ class DecypharrUtils {
                 } else if (data.channel === 'nightly') {
                     versionBadge.classList.add('badge-error');
                 }
-            }
-
-            if (docsLink) {
-                const channel = data.channel === 'beta' ? 'beta' : 'stable';
-                docsLink.href = `https://sirrobot01.github.io/decypharr/${channel}/`;
             }
         } catch (error) {
             console.error('Error fetching version:', error);
