@@ -1,13 +1,64 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-func (c *Config) IsAllowedFile(filename string) bool {
+var (
+	ErrFileIsSample      = errors.New("file is sample")
+	ErrFileExtNotAllowed = errors.New("file extension not allowed")
+)
+
+var (
+	sampleMatch = `(?i)(^|[\s/\\])(sample|trailer|thumb|special|extras?)s?[-/]|(\((sample|trailer|thumb|special|extras?)s?\))|(-\s*(sample|trailer|thumb|special|extras?)s?)`
+	sampleRegex = regexp.MustCompile(sampleMatch)
+)
+
+func isSample(path string) bool {
+	filename := filepath.Base(path)
+	if strings.HasSuffix(strings.ToLower(filename), "sample.mkv") {
+		return true
+	}
+	return sampleRegex.MatchString(filename)
+}
+
+func (c *Config) IsFileAllowed(filename string, filesize int64) error {
+	// Skip samples if configured
+	if !c.AllowSamples && isSample(filename) {
+		// Skip sample files
+		return ErrFileIsSample
+	}
+
+	if !c.isNameAllowed(filename) {
+		return ErrFileExtNotAllowed
+	}
+
+	// Check size constraints
+	if !c.isSizeAllowed(filesize) {
+		return fmt.Errorf("file size %d is not allowed. expected range: [%d - %d]", filesize, c.GetMinFileSize(), c.GetMaxFileSize())
+	}
+	return nil
+}
+
+func (c *Config) isSizeAllowed(size int64) bool {
+	if size == 0 {
+		return true // Maybe the debrid hasn't reported the size yet
+	}
+	if c.GetMinFileSize() > 0 && size < c.GetMinFileSize() {
+		return false
+	}
+	if c.GetMaxFileSize() > 0 && size > c.GetMaxFileSize() {
+		return false
+	}
+	return true
+}
+func (c *Config) isNameAllowed(filename string) bool {
 	ext := strings.ToLower(filepath.Ext(filename))
 	if ext == "" {
 		return false

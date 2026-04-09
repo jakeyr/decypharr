@@ -1,8 +1,8 @@
 package alldebrid
 
 import (
-	"encoding/json"
 	"fmt"
+	json "github.com/bytedance/sonic"
 )
 
 type errorResponse struct {
@@ -130,4 +130,18 @@ type UserProfileResponse struct {
 			Notifications        []string       `json:"notifications"`
 		} `json:"user"`
 	} `json:"data"`
+}
+
+type LinksListResponse struct {
+	Status string `json:"status"`
+	Data   struct {
+		Links []struct {
+			Link     string `json:"link"`
+			Filename string `json:"filename"`
+			Size     int64  `json:"size"`
+			Host     string `json:"host"`
+			Date     int64  `json:"date"`
+		} `json:"links"`
+	} `json:"data"`
+	Error *errorResponse `json:"error"`
 }

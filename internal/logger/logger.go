@@ -2,13 +2,14 @@ package logger
 
 import (
 	"fmt"
-	"github.com/rs/zerolog"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"gopkg.in/natefinch/lumberjack.v2"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/rs/zerolog"
+	"github.com/sirrobot01/decypharr/internal/config"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 var (
@@ -17,8 +18,7 @@ var (
 )
 
 func GetLogPath() string {
-	cfg := config.Get()
-	logsDir := filepath.Join(cfg.Path, "logs")
+	logsDir := filepath.Join(config.GetMainPath(), "logs")
 
 	if _, err := os.Stat(logsDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(logsDir, 0755); err != nil {
@@ -30,14 +30,14 @@ func GetLogPath() string {
 }
 
 func New(prefix string) zerolog.Logger {
-
 	level := config.Get().LogLevel
 
 	rotatingLogFile := &lumberjack.Logger{
-		Filename: filepath.Join(GetLogPath(), "decypharr.log"),
-		MaxSize:  10,
-		MaxAge:   15,
-		Compress: true,
+		Filename:   filepath.Join(GetLogPath(), "decypharr.log"),
+		MaxSize:    10,
+		MaxAge:     15,
+		MaxBackups: 10, // Limit backup files to prevent disk fill-up
+		Compress:   true,
 	}
 
 	consoleWriter := zerolog.ConsoleWriter{

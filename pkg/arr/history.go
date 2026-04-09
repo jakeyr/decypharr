@@ -1,12 +1,19 @@
 package arr
 
 import (
-	"encoding/json"
-	"io"
+	"fmt"
 	"net/http"
 	gourl "net/url"
 	"strconv"
 	"strings"
+)
+
+type QueueAction string
+
+const (
+	QueueActionNone      QueueAction = ""
+	QueueActionBlocklist QueueAction = "blocklist"
+	QueueActionImport    QueueAction = "import"
 )
 
 type HistorySchema struct {
@@ -60,18 +67,15 @@ func (a *Arr) GetHistory(downloadId, eventType string) *HistorySchema {
 	query.Add("eventType", eventType)
 	query.Add("pageSize", "100")
 	url := "api/v3/history" + "?" + query.Encode()
-	resp, err := a.Request(http.MethodGet, url, nil)
+	var data *HistorySchema
+	resp, err := a.Request(http.MethodGet, url, nil, &data)
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
-	var data *HistorySchema
-
-	if err = json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	if resp.StatusCode != http.StatusOK {
 		return nil
 	}
 	return data
-
 }
 
 func (a *Arr) GetQueue() []QueueSchema {
@@ -82,100 +86,101 @@ func (a *Arr) GetQueue() []QueueSchema {
 
 	for {
 		url := "api/v3/queue" + "?" + query.Encode()
-		resp, err := a.Request(http.MethodGet, url, nil)
+		var data QueueResponseScheme
+		resp, err := a.Request(http.MethodGet, url, nil, &data)
 		if err != nil {
 			break
 		}
-
-		func() {
-			defer func(Body io.ReadCloser) {
-				err := Body.Close()
-				if err != nil {
-					return
-				}
-			}(resp.Body)
-
-			var data QueueResponseScheme
-			if err = json.NewDecoder(resp.Body).Decode(&data); err != nil {
-				return
-			}
-
-			results = append(results, data.Records...)
-
-			if len(results) >= data.TotalRecords {
-				// We've fetched all records
-				err = io.EOF // Signal to exit the loop
-				return
-			}
-
-			query.Set("page", strconv.Itoa(data.Page+1))
-		}()
-
-		if err != nil {
+		if resp.StatusCode != http.StatusOK {
 			break
 		}
+
+		results = append(results, data.Records...)
+
+		if len(results) >= data.TotalRecords {
+			break
+		}
+
+		query.Set("page", strconv.Itoa(data.Page+1))
 	}
 
 	return results
 }
 
-func (a *Arr) CleanupQueue() error {
-	queue := a.GetQueue()
-	type messedUp struct {
-		id        int
-		episodeId int
-		seasonNum int
+func queueFilter(q QueueSchema) QueueAction {
+	// Check for failed downloads(for both usenet and torrent)
+	if q.Status == "failed" {
+		return QueueActionBlocklist
 	}
-	cleanups := make(map[int][]messedUp)
-	for _, q := range queue {
-		isMessedUp := false
-		if q.Protocol == "torrent" && q.Status == "completed" && q.TrackedDownloadStatus == "warning" && q.TrackedDownloadState == "importPending" {
-			messages := q.StatusMessages
-			if len(messages) > 0 {
-				for _, m := range messages {
-					if strings.Contains(strings.Join(m.Messages, " "), "No files found are eligible") {
-						isMessedUp = true
-						break
-					}
-					if strings.Contains(m.Title, "One or more episodes expected in this release were not imported or missing from the release") {
-						isMessedUp = true
-						break
-					}
+
+	// Check for completed downloads with warning status and import pending state
+	if q.Status == "completed" && q.TrackedDownloadStatus == "warning" {
+		// Check status messages for specific errors
+		messages := q.StatusMessages
+		if len(messages) > 0 {
+			for _, m := range messages {
+				if strings.Contains(strings.ToLower(strings.Join(m.Messages, " ")), "no files found are eligible") {
+					return QueueActionBlocklist
+				}
+				if strings.Contains(strings.ToLower(m.Title), "one or more episodes expected in this release were not imported or missing from the release") {
+					return QueueActionBlocklist
+				}
+				if strings.Contains(strings.ToLower(strings.Join(m.Messages, " ")), "downloaded file is empty") {
+					return QueueActionBlocklist
+				}
+				if strings.Contains(strings.ToLower(strings.Join(m.Messages, " ")), "found matching series via grab history, but release was matched to series by id") {
+					return QueueActionImport
 				}
 			}
 		}
-		if isMessedUp {
-			cleanups[q.SeriesId] = append(cleanups[q.SeriesId], messedUp{
-				id:        q.Id,
-				episodeId: q.EpisodeId,
-				seasonNum: q.SeasonNumber,
-			})
+	}
+	return QueueActionNone
+}
+
+func (a *Arr) CleanupQueue() error {
+	if a == nil {
+		return fmt.Errorf("arr not configured")
+	}
+	queue := a.GetQueue()
+	blacklists := make(map[int]bool)
+	manualImports := make(map[string]bool)
+	for _, q := range queue {
+		switch queueFilter(q) {
+		case QueueActionBlocklist:
+			blacklists[q.Id] = true
+		case QueueActionImport:
+			manualImports[q.DownloadId] = true
 		}
 	}
 
-	if len(cleanups) == 0 {
-		return nil
-	}
-
-	queueIds := make([]int, 0)
-
-	for _, c := range cleanups {
-		// Delete the messed up episodes from queue
-		for _, m := range c {
-			queueIds = append(queueIds, m.id)
+	if len(blacklists) > 0 {
+		if err := a.BlackListAndResearchItems(blacklists); err != nil {
+			// log error
+			fmt.Println("Error during blacklist and research:", err)
 		}
 	}
+	if len(manualImports) > 0 {
+		go func() {
+			if err := a.ManualImportItems(manualImports); err != nil {
+				// log error
+				fmt.Println("Error during manual import:", err)
+			}
+		}()
+	}
 
-	// Delete the messed up episodes from queue
+	return nil
+}
 
+func (a *Arr) BlackListAndResearchItems(items map[int]bool) error {
+	queueIDs := make([]int, 0)
+	for id := range items {
+		queueIDs = append(queueIDs, id)
+	}
 	payload := struct {
 		Ids []int `json:"ids"`
 	}{
-		Ids: queueIds,
+		Ids: queueIDs,
 	}
-
-	// Blocklist that hash(it's typically not complete, then research the episode)
-
 	query := gourl.Values{}
 	query.Add("removeFromClient", "true")
 	query.Add("blocklist", "true")
@@ -183,9 +188,20 @@ func (a *Arr) CleanupQueue() error {
 	query.Add("changeCategory", "false")
 	url := "api/v3/queue/bulk" + "?" + query.Encode()
 
-	_, err := a.Request(http.MethodDelete, url, payload)
+	_, err := a.Request(http.MethodDelete, url, payload, nil)
 	if err != nil {
 		return err
+	}
+	return nil
+}
+
+func (a *Arr) ManualImportItems(items map[string]bool) error {
+	for downloadId := range items {
+		_, err := a.Import(downloadId)
+		if err != nil {
+			// log error
+			fmt.Println(err)
+		}
 	}
 	return nil
 }

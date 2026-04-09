@@ -2,13 +2,13 @@ package server
 
 import (
 	"cmp"
-	"encoding/json"
-	"github.com/sirrobot01/decypharr/pkg/wire"
 	"net/http"
+
+	json "github.com/bytedance/sonic"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
 func (s *Server) handleTautulli(w http.ResponseWriter, r *http.Request) {
-	// Verify it's a POST request
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -23,7 +23,7 @@ func (s *Server) handleTautulli(w http.ResponseWriter, r *http.Request) {
 		AutoProcess bool   `json:"autoProcess"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&payload); err != nil {
 		s.logger.Error().Err(err).Msg("Failed to parse webhook body")
 		http.Error(w, "Failed to parse webhook body: "+err.Error(), http.StatusBadRequest)
 		return
@@ -38,15 +38,12 @@ func (s *Server) handleTautulli(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid ID", http.StatusBadRequest)
 		return
 	}
-	repair := wire.Get().Repair()
 
 	mediaId := cmp.Or(payload.TmdbID, payload.TvdbID)
-
-	if repair == nil {
-		http.Error(w, "Repair service is not enabled", http.StatusInternalServerError)
-		return
-	}
-	if err := repair.AddJob([]string{}, []string{mediaId}, payload.AutoProcess, false); err != nil {
+	if _, err := s.manager.Repair().AddJob(manager.RepairJobOptions{
+		MediaIDs:    []string{mediaId},
+		AutoProcess: payload.AutoProcess,
+	}); err != nil {
 		http.Error(w, "Failed to add job: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
