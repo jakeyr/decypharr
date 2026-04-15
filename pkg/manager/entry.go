@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/utils"
+	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/version"
 )
@@ -77,7 +79,7 @@ func (m *Manager) RootInfo() *FileInfo {
 }
 
 // GetEntries returns the subdirectories under a given mount name
-// it would show __all__, __bad__, torrents, nzbs and any custom folders
+// it would show __all__, __bad__, torrents, nzbs, per-provider folders and any custom folders
 func (m *Manager) GetEntries() []FileInfo {
 	now := utils.Now()
 	var subDirs []FileInfo
@@ -90,6 +92,18 @@ func (m *Manager) GetEntries() []FileInfo {
 			size:    0,
 		})
 	}
+
+	// Per-provider folders (one per configured debrid client)
+	m.clients.Range(func(name string, _ debrid.Client) bool {
+		subDirs = append(subDirs, FileInfo{
+			name:    name,
+			isDir:   true,
+			modTime: now,
+			size:    0,
+		})
+		return true
+	})
+
 	// AddOrUpdate custom folders
 	if m.customFolders != nil {
 		for _, folderName := range m.customFolders.folders {
@@ -295,6 +309,33 @@ func (m *Manager) getEntryChildren(group string) (*FileInfo, []FileInfo) {
 		currentDir.isDir = false
 		return currentDir, nil
 	default:
+		// Per-provider folder if the name matches a configured client
+		if _, ok := m.clients.Load(group); ok {
+			var infos []FileInfo
+			seen := make(map[string]struct{})
+			err := m.storage.ForEachMeta(func(meta *storage.EntryMetaInfo) error {
+				if meta.Provider == group {
+					if _, ok := seen[meta.Name]; ok {
+						return nil
+					}
+					seen[meta.Name] = struct{}{}
+					infos = append(infos, FileInfo{
+						infohash:     meta.InfoHash,
+						name:         meta.Name,
+						size:         meta.Size,
+						modTime:      meta.AddedOn,
+						isDir:        true,
+						activeDebrid: meta.Provider,
+						canDelete:    true,
+					})
+				}
+				return nil
+			})
+			if err != nil {
+				return nil, nil
+			}
+			return currentDir, infos
+		}
 		// Custom folder
 		return currentDir, m.getCustomFolderChildren(group)
 	}
@@ -467,10 +508,21 @@ func (m *Manager) getCustomFolderChildren(folder string) []FileInfo {
 		if meta.Bad {
 			return nil
 		}
+		getFileNames := func() []string {
+			item, err := m.storage.GetEntryItem(meta.Name)
+			if err != nil || item == nil {
+				return nil
+			}
+			names := make([]string, 0, len(item.Files))
+			for fn := range item.Files {
+				names = append(names, strings.ToLower(fn))
+			}
+			return names
+		}
 		if m.customFolders.matchesFilter(folder, &FileInfo{
 			name: meta.Name,
 			size: meta.Size,
-		}, meta.AddedOn) {
+		}, meta.AddedOn, getFileNames) {
 			if _, ok := seen[meta.Name]; ok {
 				return nil
 			}
