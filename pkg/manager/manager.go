@@ -353,6 +353,22 @@ func (m *Manager) Start(ctx context.Context) error {
 	// run the migration process
 	m.migrate()
 
+	// Backfill qBit categories from torrents.json into Storage entries.
+	// Cache-file migration leaves Category empty for every existing torrent
+	// because the cache format doesn't carry it; this picks up the data from
+	// the persistent qBit-emulated state on disk. Idempotent — only writes
+	// when an entry's Category is currently empty.
+	if matched, updated, skipped, missing, err := m.backfillCategoriesFromTorrentsJSON(); err != nil {
+		m.logger.Warn().Err(err).Msg("category-backfill: failed to read torrents.json")
+	} else if matched+missing > 0 {
+		m.logger.Info().
+			Int("matched", matched).
+			Int("updated", updated).
+			Int("skipped_already_set", skipped).
+			Int("missing_from_storage", missing).
+			Msg("category-backfill from torrents.json complete")
+	}
+
 	go func() {
 		m.syncTorrents(ctx)
 		// Sync NZBs
