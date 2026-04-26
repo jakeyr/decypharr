@@ -158,6 +158,14 @@ func (c *Config) TorrentsFile() string {
 	return filepath.Join(GetMainPath(), "torrents.json")
 }
 
+// ArrMetadataDBFile returns the path to the optional sqlite metadata DB
+// (`arr_metadata.db`) that some deployments use as a durable side-channel
+// for `infohash → qBit category` mappings — survives cache rewrites where
+// the upstream cache file lacks an `arr` field.
+func (c *Config) ArrMetadataDBFile() string {
+	return filepath.Join(GetMainPath(), "arr_metadata.db")
+}
+
 func (c *Config) loadConfig() error {
 	// Load the config file
 	// Read the JSON config file directly

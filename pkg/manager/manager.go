@@ -369,6 +369,22 @@ func (m *Manager) Start(ctx context.Context) error {
 			Msg("category-backfill from torrents.json complete")
 	}
 
+	// Same backfill from the optional arr_metadata.db side-channel. Runs
+	// after the torrents.json pass so anything torrents.json already set
+	// shows up here as `skipped_already_set`. The DB rescues entries that
+	// fall out of torrents.json (qBit-emulator rewrites it on state
+	// changes) and is the durable home for `infohash → category` mappings.
+	if matched, updated, skipped, missing, err := m.backfillCategoriesFromMetadataDB(); err != nil {
+		m.logger.Warn().Err(err).Msg("category-backfill: failed to read arr_metadata.db")
+	} else if matched+missing > 0 {
+		m.logger.Info().
+			Int("matched", matched).
+			Int("updated", updated).
+			Int("skipped_already_set", skipped).
+			Int("missing_from_storage", missing).
+			Msg("category-backfill from arr_metadata.db complete")
+	}
+
 	go func() {
 		m.syncTorrents(ctx)
 		// Sync NZBs
